@@ -1,0 +1,123 @@
+name: Publish Build Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Successful Build Matrix run ID"
+        required: true
+        type: string
+      release_tag:
+        description: "Existing GitHub Release tag"
+        required: true
+        type: string
+
+concurrency:
+  group: publish-build-artifacts-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish Windows and macOS artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Validate source run and release
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.source_run_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}")"
+          test "$(jq -r '.status' <<<"${RUN_JSON}")" = "completed"
+          test "$(jq -r '.conclusion' <<<"${RUN_JSON}")" = "success"
+          test "$(jq -r '.repository.full_name' <<<"${RUN_JSON}")" = "${GITHUB_REPOSITORY}"
+
+          HEAD_SHA="$(jq -r '.head_sha' <<<"${RUN_JSON}")"
+          test -n "${HEAD_SHA}" && test "${HEAD_SHA}" != "null"
+          gh release view "${RELEASE_TAG}" >/dev/null
+          echo "head_sha=${HEAD_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout built source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.source.outputs.head_sha }}
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bundles-windows-latest
+          path: artifacts/bundles-windows-latest
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Download macOS Apple Silicon artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bundles-macos-aarch64
+          path: artifacts/bundles-macos-aarch64
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Download macOS Intel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bundles-macos-x86_64
+          path: artifacts/bundles-macos-x86_64
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Download macOS Universal artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bundles-macos-universal
+          path: artifacts/bundles-macos-universal
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/stage_release_assets.cjs \
+            --platform windows \
+            --assets-dir artifacts/bundles-windows-latest \
+            --output-dir staged/windows
+          node scripts/release/stage_release_assets.cjs \
+            --platform macos \
+            --mac-arch aarch64 \
+            --assets-dir artifacts/bundles-macos-aarch64 \
+            --output-dir staged/macos-aarch64
+          node scripts/release/stage_release_assets.cjs \
+            --platform macos \
+            --mac-arch x64 \
+            --assets-dir artifacts/bundles-macos-x86_64 \
+            --output-dir staged/macos-x86_64
+          node scripts/release/stage_release_assets.cjs \
+            --platform macos \
+            --mac-arch universal \
+            --assets-dir artifacts/bundles-macos-universal \
+            --output-dir staged/macos-universal
+
+          find staged -mindepth 2 -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  staged/[^/]*/#  #' \
+            > staged/SHA256SUMS.txt
+          test -s staged/SHA256SUMS.txt
+
+      - name: Upload assets directly to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' ASSETS < <(find staged -type f -print0)
+          test "${#ASSETS[@]}" -gt 1
+          gh release upload "${RELEASE_TAG}" "${ASSETS[@]}" --clobber
