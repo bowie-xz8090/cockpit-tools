@@ -40,7 +40,7 @@ jobs:
 
           HEAD_SHA="$(jq -r '.head_sha' <<<"${RUN_JSON}")"
           test -n "${HEAD_SHA}" && test "${HEAD_SHA}" != "null"
-          gh release view "${RELEASE_TAG}" >/dev/null
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null
           echo "head_sha=${HEAD_SHA}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout built source
@@ -120,4 +120,6 @@ jobs:
           set -euo pipefail
           mapfile -d '' ASSETS < <(find staged -type f -print0)
           test "${#ASSETS[@]}" -gt 1
-          gh release upload "${RELEASE_TAG}" "${ASSETS[@]}" --clobber
+          gh release upload "${RELEASE_TAG}" "${ASSETS[@]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
