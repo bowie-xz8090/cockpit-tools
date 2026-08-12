@@ -6843,6 +6843,70 @@ fn calculate_usage_cost_usd_from_tokens(
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CodexSessionUsageCostEstimate {
+    pub estimated_cost_usd: f64,
+    pub priced: bool,
+    pub pricing_version: u64,
+    pub input_usd_per_million: f64,
+    pub cached_input_usd_per_million: f64,
+    pub output_usd_per_million: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CodexSessionPricingResolver {
+    collection: Option<CodexLocalAccessCollection>,
+}
+
+impl CodexSessionPricingResolver {
+    pub(crate) fn load() -> Self {
+        Self {
+            collection: load_collection_from_disk().ok().flatten(),
+        }
+    }
+
+    pub(crate) fn estimate(
+        &self,
+        model_id: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+        reasoning_tokens: u64,
+    ) -> CodexSessionUsageCostEstimate {
+        let usage = UsageCapture {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            cached_tokens,
+            reasoning_tokens,
+            token_breakdown: None,
+        };
+        let Some(pricing) = resolve_effective_model_pricing(
+            self.collection.as_ref(),
+            Some(model_id),
+            Some(&usage),
+            None,
+        ) else {
+            return CodexSessionUsageCostEstimate::default();
+        };
+        CodexSessionUsageCostEstimate {
+            estimated_cost_usd: calculate_usage_cost_usd(Some(&usage), Some(&pricing)),
+            priced: true,
+            pricing_version: self
+                .collection
+                .as_ref()
+                .map(|collection| collection.model_pricing_version)
+                .unwrap_or(DEFAULT_MODEL_PRICING_VERSION)
+                .max(DEFAULT_MODEL_PRICING_VERSION),
+            input_usd_per_million: pricing.input_usd_per_million,
+            cached_input_usd_per_million: pricing
+                .cached_input_usd_per_million
+                .unwrap_or(pricing.input_usd_per_million),
+            output_usd_per_million: pricing.output_usd_per_million,
+        }
+    }
+}
+
 fn trim_recent_events(events: &mut Vec<CodexLocalAccessUsageEvent>, retention_since: i64) {
     events.retain(|event| event.timestamp > 0 && event.timestamp >= retention_since);
     events.sort_by_key(|event| event.timestamp);

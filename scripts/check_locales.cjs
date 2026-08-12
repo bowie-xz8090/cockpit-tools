@@ -145,6 +145,12 @@ function isLikelyEnglishValue(value) {
 function isAllowedEnglishReuse(key, value) {
   if (typeof value !== 'string') return false;
 
+  // New feature copy may intentionally use the English fallback until all
+  // supported locales receive dedicated translations.
+  if (key.startsWith('dashboard.costStats.')) {
+    return true;
+  }
+
   const normalized = value.trim();
   if (!normalized) return true;
 

@@ -28,8 +28,9 @@ import {
   usePlatformLayoutStore,
 } from '../stores/usePlatformLayoutStore';
 import { Page } from '../types/navigation';
-import { Users, CheckCircle2, Sparkles, RotateCw, Play, Github, Tag, ChevronDown, EyeOff, X } from 'lucide-react';
+import { Users, CheckCircle2, Sparkles, RotateCw, Play, Github, Tag, ChevronDown, EyeOff, NotebookTabs, X } from 'lucide-react';
 import { TagEditModal } from '../components/TagEditModal';
+import { CodexUsageCostStatsModal } from '../components/codex/CodexUsageCostStatsModal';
 import { Account } from '../types/account';
 import {
   CodebuddyAccount,
@@ -280,6 +281,7 @@ export function DashboardPage({
   const antigravityRuntimeTarget = useAntigravityRuntimeTarget();
 
   const [tagModalState, setTagModalState] = React.useState<{ accountId: string; platform: PlatformId | 'codebuddy_cn'; tags: string[] } | null>(null);
+  const [codexCostStatsAccountId, setCodexCostStatsAccountId] = React.useState<string | null>(null);
   const [dashboardCardCollapse, setDashboardCardCollapse] = React.useState<DashboardCardCollapseState>({
     workbuddy: false,
   });
@@ -576,6 +578,13 @@ export function DashboardPage({
   const codexCurrentAccount = useMemo(() => {
     return resolveDashboardCurrentAccount(codexAccounts, codexCurrentId, codexCurrent);
   }, [codexAccounts, codexCurrent, codexCurrentId]);
+  const codexCostStatsAccount = useMemo(
+    () =>
+      codexCostStatsAccountId
+        ? codexAccounts.find((account) => account.id === codexCostStatsAccountId) ?? null
+        : null,
+    [codexAccounts, codexCostStatsAccountId],
+  );
 
   const claudeCurrent = useMemo(
     () => resolveDashboardCurrentAccount(claudeAccounts, claudeCurrentId),
@@ -2135,6 +2144,7 @@ export function DashboardPage({
     sublineTitle,
     maxMetrics = 3,
     onEditTags,
+    onOpenCostStats,
   }: {
     presentation: UnifiedAccountPresentation;
     onRefresh: () => void;
@@ -2146,6 +2156,7 @@ export function DashboardPage({
     sublineTitle?: string;
     maxMetrics?: number;
     onEditTags?: () => void;
+    onOpenCostStats?: () => void;
   }) => {
     const resolvedSublineText = sublineText || presentation.sublineText || '';
     const shouldShowPlan = Boolean(presentation.planLabel) && presentation.planLabel !== 'UNKNOWN';
@@ -2177,6 +2188,16 @@ export function DashboardPage({
         </div>
 
         <div className="account-mini-actions icon-only-row">
+          {onOpenCostStats && (
+            <button
+              className="mini-icon-btn"
+              onClick={onOpenCostStats}
+              title={t('dashboard.costStats.action', '成本统计')}
+              aria-label={t('dashboard.costStats.action', '成本统计')}
+            >
+              <NotebookTabs size={14} />
+            </button>
+          )}
           {onEditTags && (
             <button
               className="mini-icon-btn"
@@ -2357,6 +2378,14 @@ export function DashboardPage({
           )}
 
           <div className="account-mini-actions icon-only-row">
+            <button
+              className="mini-icon-btn"
+              onClick={() => setCodexCostStatsAccountId(account.id)}
+              title={t('dashboard.costStats.action', '成本统计')}
+              aria-label={t('dashboard.costStats.action', '成本统计')}
+            >
+              <NotebookTabs size={14} />
+            </button>
             {!isChatCompletionsApiKey && (
               <button
                 className="mini-icon-btn"
@@ -2388,6 +2417,9 @@ export function DashboardPage({
       isSwitching: false,
       maxMetrics: 4,
       onEditTags: () => setTagModalState({ accountId: account.id, platform: 'codex', tags: account.tags || [] }),
+      onOpenCostStats: isCodexApiKeyAccount(account)
+        ? () => setCodexCostStatsAccountId(account.id)
+        : undefined,
     });
   };
 
@@ -3644,6 +3676,26 @@ export function DashboardPage({
           initialTags={tagModalState.tags}
           availableTags={dashboardAvailableTags}
           onSave={handleSaveTags}
+        />
+      )}
+
+      {codexCostStatsAccount && (
+        <CodexUsageCostStatsModal
+          account={codexCostStatsAccount}
+          remoteSummary={codexApiUsageMap[codexCostStatsAccount.id]?.summary}
+          remoteLoading={
+            codexApiUsageMap[codexCostStatsAccount.id]?.loading === true ||
+            refreshing.has(codexCostStatsAccount.id)
+          }
+          remoteError={codexApiUsageMap[codexCostStatsAccount.id]?.error}
+          remoteUnavailable={codexApiUsageMap[codexCostStatsAccount.id]?.unavailable}
+          remoteUpdatedAt={codexApiUsageMap[codexCostStatsAccount.id]?.updatedAt}
+          onRefreshRemote={() =>
+            isCodexNewApiAccount(codexCostStatsAccount)
+              ? handleRefreshCodex(codexCostStatsAccount.id)
+              : refreshCodexApiUsage(codexCostStatsAccount, { force: true })
+          }
+          onClose={() => setCodexCostStatsAccountId(null)}
         />
       )}
 

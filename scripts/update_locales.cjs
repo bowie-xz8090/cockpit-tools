@@ -288,7 +288,7 @@ const translations = {
   }
 };
 
-const ignoredFiles = ['en.json', 'zh-CN.json'];
+const ignoredFiles = ['zh-CN.json'];
 
 function updateFile(fileName) {
   if (ignoredFiles.includes(fileName)) return;
@@ -428,6 +428,81 @@ function updateFile(fileName) {
     if(setKey(content, 'error.fileCorrupted.filePath', actualTrans.error_fileCorrupted_filePath)) modified = true;
     if(setKey(content, 'error.fileCorrupted.helpText', actualTrans.error_fileCorrupted_helpText)) modified = true;
     if(setKey(content, 'error.fileCorrupted.openFolder', actualTrans.error_fileCorrupted_openFolder)) modified = true;
+
+    // Dashboard Codex usage/cost statistics fallback keys. These are intentionally
+    // English in locales without a dedicated translation and resolve through the
+    // normal i18next fallback chain until localized copy is added.
+    const costStatsFallback = {
+      action: 'Cost statistics',
+      title: 'Usage, request logs, and cost statistics',
+      overview: 'Usage and cost',
+      trends: 'Usage trends',
+      modelStats: 'Model statistics',
+      requestLogs: 'Request logs',
+      sessionSummary: 'Local Codex session usage',
+      sessionSummaryHint: 'Reads Codex session JSONL, including Codex requests sent directly to a provider without API Service.',
+      sessionScopeHint: 'Session files do not contain the full API key. These statistics cover the local Codex client and may not all belong to this account card.',
+      realTokens: 'Actual token usage',
+      cacheHitRate: 'Cache hit rate',
+      cachedTokens: '{{tokens}} cache reads',
+      requests: 'Requests',
+      sessionImported: 'Imported from Codex sessions',
+      pricedCount: '{{priced}} of {{total}} requests priced',
+      scanningSessions: 'Scanning Codex session logs...',
+      sessionEmpty: 'No recognizable Codex session usage exists in the selected range.',
+      scanMeta: 'Scanned {{files}} files, updated {{updated}}, parse issues {{errors}}',
+      remoteSummary: 'Provider usage summary',
+      remoteSummaryHint: "Data is returned by the current API provider and follows the provider's accounting rules.",
+      remoteUnavailable: 'The current provider does not expose a recognized usage endpoint.',
+      remoteEmpty: 'No provider usage summary is available. Refresh to try again.',
+      localSummary: 'Codex API Service local statistics',
+      localSummaryHint: 'Only requests routed through Codex API Service are counted. Cost uses the existing model price snapshot.',
+      localEmpty: 'There are no local requests for this account in the selected range. Requests sent directly to the provider are not collected by Cockpit.',
+      successFailure: '{{success}} succeeded / {{failure}} failed',
+      tokenBreakdown: '{{input}} input / {{output}} output',
+      pricingHint: 'Uses the model price snapshot recorded with each request',
+      averageLatency: 'Average latency',
+      routedOnly: 'Routed requests only',
+      allStatuses: 'All statuses',
+      success: 'Success',
+      failed: 'Failed',
+      searchModel: 'Filter by model...',
+      trendsHint: 'Blue shows input tokens and green shows output tokens. Cost uses the current price snapshot.',
+      inputTokens: 'Input tokens',
+      outputTokens: 'Output tokens',
+      source: 'Source',
+      client: 'Client',
+      internalSource: 'Internal source',
+      reasoningEffort: 'Reasoning effort',
+      unknown: 'Unknown',
+      sessionLogHint: 'These records are imported from Codex session token_count events and do not contain actual HTTP status, errors, or latency.',
+      cacheShort: '{{tokens}} cached',
+      unpriced: 'Unpriced',
+      sessionLogsEmpty: 'No matching Codex session logs.',
+      modelStatsHint: 'Aggregates tokens and estimated cost by the billing model recorded in each session.',
+      logCount: '{{count}} records',
+      time: 'Time',
+      status: 'Status',
+      model: 'Model',
+      tokens: 'Tokens',
+      cost: 'Cost',
+      latency: 'Latency',
+      logsEmpty: 'No matching local request logs. Only requests routed through Codex API Service are recorded.',
+      footerHint: 'Session cost is estimated from model prices; provider billing remains authoritative.'
+    };
+    Object.entries(costStatsFallback).forEach(([key, value]) => {
+      const keyPath = `dashboard.costStats.${key}`;
+      if (setKey(content, keyPath, value)) modified = true;
+      if (
+        key === 'footerHint' &&
+        setKeyIfEnglish(
+          content,
+          keyPath,
+          value,
+          'Local cost is estimated; provider billing remains authoritative.'
+        )
+      ) modified = true;
+    });
 
     // WebDAV sync keys
     if(setKey(content, 'settings.webdav.retentionTitle', actualTrans.settings_webdav_retentionTitle || enTrans.settings_webdav_retentionTitle)) modified = true;

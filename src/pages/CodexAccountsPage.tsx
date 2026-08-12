@@ -56,6 +56,7 @@ import {
   ChevronDown,
   ShieldCheck,
   Minimize2,
+  NotebookTabs,
 } from "lucide-react";
 import { useCodexAccountStore } from "../stores/useCodexAccountStore";
 import { useCodexInstanceStore } from "../stores/useCodexInstanceStore";
@@ -162,6 +163,7 @@ import {
 } from "../components/codex/CodexWakeupContent";
 import { CodexModelProviderManager } from "../components/codex/CodexModelProviderManager";
 import { CodexSpeedSelect } from "../components/codex/CodexSpeedSelect";
+import { CodexUsageCostStatsModal } from "../components/codex/CodexUsageCostStatsModal";
 import { QuickSettingsPopover } from "../components/QuickSettingsPopover";
 import { useProviderAccountsPage } from "../hooks/useProviderAccountsPage";
 import { usePlatformRuntimeSupport } from "../hooks/usePlatformRuntimeSupport";
@@ -1326,6 +1328,9 @@ export function CodexAccountsPage() {
   const [apiKeyUsageDetailAccountId, setApiKeyUsageDetailAccountId] = useState<
     string | null
   >(null);
+  const [costStatsAccountId, setCostStatsAccountId] = useState<string | null>(
+    null,
+  );
   const [quotaErrorDetail, setQuotaErrorDetail] = useState<{
     accountName: string;
     message: string;
@@ -3858,6 +3863,13 @@ export function CodexAccountsPage() {
         : null,
     [accounts, apiKeyUsageDetailAccountId],
   );
+  const costStatsAccount = useMemo(
+    () =>
+      costStatsAccountId
+        ? (accounts.find((item) => item.id === costStatsAccountId) ?? null)
+        : null,
+    [accounts, costStatsAccountId],
+  );
 
   useEffect(() => {
     if (cockpitApiPanelAccountId && !cockpitApiPanelAccount) {
@@ -3870,6 +3882,12 @@ export function CodexAccountsPage() {
       setApiKeyUsageDetailAccountId(null);
     }
   }, [apiKeyUsageDetailAccount, apiKeyUsageDetailAccountId]);
+
+  useEffect(() => {
+    if (costStatsAccountId && !costStatsAccount) {
+      setCostStatsAccountId(null);
+    }
+  }, [costStatsAccount, costStatsAccountId]);
 
   useEffect(() => {
     if (
@@ -11143,6 +11161,16 @@ export function CodexAccountsPage() {
             {renderAccountSpeedSelect(account)}
             <div className="card-footer">
               <div className="card-actions">
+                {isApiKeyAccount && (
+                  <button
+                    className="card-action-btn"
+                    onClick={() => setCostStatsAccountId(account.id)}
+                    title={t("dashboard.costStats.action", "成本统计")}
+                    aria-label={t("dashboard.costStats.action", "成本统计")}
+                  >
+                    <NotebookTabs size={14} />
+                  </button>
+                )}
                 <button
                   className="card-action-btn"
                   onClick={() => void handleLaunchCodexCli(account)}
@@ -12520,6 +12548,16 @@ export function CodexAccountsPage() {
           </td>
           <td className="sticky-action-cell table-action-cell">
             <div className="action-buttons">
+              {isApiKeyAccount && (
+                <button
+                  className="action-btn"
+                  onClick={() => setCostStatsAccountId(account.id)}
+                  title={t("dashboard.costStats.action", "成本统计")}
+                  aria-label={t("dashboard.costStats.action", "成本统计")}
+                >
+                  <NotebookTabs size={14} />
+                </button>
+              )}
               <button
                 className="action-btn"
                 onClick={() => void handleLaunchCodexCli(account)}
@@ -14082,6 +14120,24 @@ export function CodexAccountsPage() {
       {renderCockpitApiServicePanel()}
       {renderApiKeyUsageDetailModal()}
       {renderQuotaErrorDetailModal()}
+      {costStatsAccount && (
+        <CodexUsageCostStatsModal
+          account={costStatsAccount}
+          remoteSummary={apiKeyUsageMap[costStatsAccount.id]?.summary}
+          remoteLoading={apiKeyUsageMap[costStatsAccount.id]?.loading === true}
+          remoteError={apiKeyUsageMap[costStatsAccount.id]?.error}
+          remoteUnavailable={apiKeyUsageMap[costStatsAccount.id]?.unavailable}
+          remoteUpdatedAt={apiKeyUsageMap[costStatsAccount.id]?.updatedAt}
+          onRefreshRemote={() =>
+            isCodexNewApiAccount(costStatsAccount)
+              ? Promise.resolve(handleRefresh(costStatsAccount.id))
+              : refreshApiKeyUsageByAccountId(costStatsAccount.id, {
+                  force: true,
+                })
+          }
+          onClose={() => setCostStatsAccountId(null)}
+        />
+      )}
 
       {activeTab === "overview" && (
         <>

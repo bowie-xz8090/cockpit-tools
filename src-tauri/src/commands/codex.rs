@@ -12,9 +12,9 @@ use crate::models::codex_local_access::{
     CodexLocalAccessTimeoutPreset, CodexLocalAccessTimeouts, CodexLocalAccessUsageEventPage,
 };
 use crate::modules::{
-    account, codex_account, codex_local_access, codex_oauth, codex_quota, codex_session_visibility,
-    codex_speed, codex_wakeup, codex_wakeup_scheduler, config, hermes_auth, logger, openclaw_auth,
-    opencode_auth, process,
+    account, codex_account, codex_local_access, codex_oauth, codex_quota, codex_session_usage,
+    codex_session_visibility, codex_speed, codex_wakeup, codex_wakeup_scheduler, config,
+    hermes_auth, logger, openclaw_auth, opencode_auth, process,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -3077,6 +3077,39 @@ pub async fn codex_query_model_provider_usage(
             }
         }
     }
+}
+
+#[tauri::command]
+pub async fn codex_query_session_usage_summary(
+    start_at: i64,
+    end_at: i64,
+) -> Result<codex_session_usage::CodexSessionUsageSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        codex_session_usage::query_session_usage_summary(start_at, end_at)
+    })
+    .await
+    .map_err(|error| format!("Codex 会话统计任务失败: {error}"))?
+}
+
+#[tauri::command]
+pub async fn codex_query_session_usage_events(
+    start_at: i64,
+    end_at: i64,
+    page: u64,
+    page_size: u64,
+    model_query: Option<String>,
+) -> Result<codex_session_usage::CodexSessionUsageEventPage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        codex_session_usage::query_session_usage_events(
+            start_at,
+            end_at,
+            page,
+            page_size,
+            model_query,
+        )
+    })
+    .await
+    .map_err(|error| format!("Codex 会话日志查询任务失败: {error}"))?
 }
 
 async fn query_new_api_model_provider_usage(
