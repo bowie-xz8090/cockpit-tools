@@ -72,6 +72,8 @@ export interface CodexLocalAccessApiKey {
   modelPrefix?: string | null;
   allowedModels: string[];
   excludedModels: string[];
+  tokenLimit?: number | null;
+  tokenUsed: number;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
@@ -196,6 +198,24 @@ export interface CodexLocalAccessStatsWindow {
   accounts: CodexLocalAccessAccountStats[];
   models: CodexLocalAccessModelStats[];
   apiKeys: CodexLocalAccessApiKeyStats[];
+}
+
+export interface CodexLocalAccessAccountWindowQuery {
+  accountId: string;
+  windowKey: string;
+  startAt: number;
+  endAt: number;
+}
+
+export interface CodexLocalAccessAccountWindowStats {
+  accountId: string;
+  windowKey: string;
+  requestCount: number;
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
 }
 
 export interface CodexTokenInputBreakdown {
@@ -364,6 +384,7 @@ export interface CodexLocalAccessAppendAccountSkipped {
   reason:
     | "not_found"
     | "chat_completions_api_key"
+    | "deepseek_unsupported"
     | "free_restricted"
     | "pending_oauth"
     | "web_session_quota_only";

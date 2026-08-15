@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -376,6 +375,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	clientBody := body
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
+	upstreamBody, identityState = applyCodexFingerprintBody(e.cfg, auth, originalPayloadSource, upstreamBody, identityState)
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 	if isCodexAgentIdentityAuth(auth) {
@@ -387,6 +387,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	}
 	removeCodexResponsesLiteHeaderForFullResponse(wsHeaders, useFullResponses)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
+	applyCodexFingerprintHeaders(wsHeaders, &identityState)
 
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
@@ -656,6 +657,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	clientBody := body
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, userPayload, body)
+	upstreamBody, identityState = applyCodexFingerprintBody(e.cfg, auth, userPayload, upstreamBody, identityState)
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
 	if isCodexAgentIdentityAuth(auth) {
@@ -667,6 +669,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	removeCodexResponsesLiteHeaderForFullResponse(wsHeaders, useFullResponses)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
+	applyCodexFingerprintHeaders(wsHeaders, &identityState)
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID
@@ -1043,14 +1046,15 @@ func buildCodexWebsocketRequestBody(body []byte) []byte {
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.
 	// Incremental follow-up turns continue on the same websocket using
 	// `previous_response_id` + incremental `input`, not `response.append`.
+	//
+	// Sanitize may return the original buffer unchanged; sjson.SetBytes then
+	// allocates the outbound envelope without an extra pre-clone.
 	body = helps.SanitizeCodexInputItemIDs(body)
-	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
+	wsReqBody, errSet := sjson.SetBytes(body, "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
 	}
-	fallback := bytes.Clone(body)
-	fallback, _ = sjson.SetBytes(fallback, "type", "response.create")
-	return fallback
+	return body
 }
 
 func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
@@ -1188,7 +1192,7 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 
 	if cache.ID != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", cache.ID)
-		setHeaderCasePreserved(headers, "session_id", cache.ID)
+		setHeaderCasePreserved(headers, "Session-Id", cache.ID)
 		headers.Set("Conversation_id", cache.ID)
 	}
 
@@ -1216,13 +1220,12 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
 	misc.EnsureHeader(headers, ginHeaders, "Version", "")
+	misc.EnsureHeader(headers, ginHeaders, "X-Codex-Window-Id", "")
+	misc.EnsureHeader(headers, ginHeaders, "Thread-Id", "")
+	misc.EnsureHeader(headers, ginHeaders, "Session-Id", "")
 	copyCodexResponsesLiteHeader(headers, ginHeaders)
 	copyCodexAgtoolsDiagnosticHeaders(headers, ginHeaders)
-	if isAPIKey {
-		ensureHeaderWithPriority(headers, ginHeaders, "User-Agent", "", "")
-	} else {
-		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
-	}
+	applyCodexClientIdentityHeaders(headers, ginHeaders, cfg, cfgUserAgent, isAPIKey)
 
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
 	if betaHeader == "" && ginHeaders != nil {
@@ -1232,16 +1235,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
-	sessionFallback := ""
-	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
-		sessionFallback = uuid.NewString()
-	}
-	ensureCodexWebsocketSessionHeader(headers, ginHeaders, sessionFallback)
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		headers.Set("Originator", originator)
-	} else if !isAPIKey {
-		headers.Set("Originator", codexOriginator)
-	}
+	ensureCodexWebsocketSessionHeader(headers, ginHeaders, "")
 	if !isAPIKey {
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
@@ -1257,6 +1251,8 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	applyCodexCloakingHeaders(headers, cfg)
+	applyPairedCodexClientIdentity(headers, !isAPIKey || codexCloakingEnabled(cfg))
 
 	return headers
 }
@@ -1273,9 +1269,8 @@ func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, f
 		sessionID = strings.TrimSpace(fallbackValue)
 	}
 	if sessionID != "" {
-		setHeaderCasePreserved(target, "session_id", sessionID)
+		applyCanonicalCodexSessionHeader(target, sessionID)
 	}
-	deleteHeaderCaseInsensitive(target, "Session-Id")
 }
 
 func codexSessionHeaderValue(headers http.Header) string {

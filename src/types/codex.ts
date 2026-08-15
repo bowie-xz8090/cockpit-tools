@@ -1,6 +1,11 @@
 export type CodexApiProviderMode = "openai_builtin" | "custom";
 export type CodexProviderWireApi = "responses" | "chat_completions";
 
+export interface CodexApiModelMapping {
+  client_model: string;
+  upstream_model: string;
+}
+
 export interface CodexQuickConfig {
   context_window_1m: boolean;
   auto_compact_token_limit: number;
@@ -9,6 +14,7 @@ export interface CodexQuickConfig {
 }
 
 export type CodexAppSpeed = "standard" | "fast";
+export type CodexFingerprintMode = "off" | "device" | "session" | "full";
 
 export interface CodexAppSpeedConfig {
   speed: CodexAppSpeed;
@@ -26,12 +32,16 @@ export interface CodexAccount {
   api_provider_id?: string;
   api_provider_name?: string;
   api_model_catalog?: string[];
+  api_model_context_windows?: Record<string, number>;
+  api_model_mappings?: CodexApiModelMapping[];
   api_sync_model_catalog_to_codex?: boolean;
   api_wire_api?: CodexProviderWireApi | null;
   api_supports_websockets?: boolean;
   api_supports_vision?: boolean;
   api_model_vision_support?: Record<string, boolean>;
   api_vision_routing_model?: string | null;
+  api_instance_access_mode?: "gateway" | "direct" | "cdp" | string | null;
+  api_startup_model?: string | null;
   bound_oauth_account_id?: string | null;
   user_id?: string;
   plan_type?: string;
@@ -47,6 +57,7 @@ export interface CodexAccount {
   account_name?: string;
   account_structure?: string;
   account_note?: string;
+  codex_fingerprint_mode?: CodexFingerprintMode;
   two_factor_secret?: string;
   account_password?: string;
   phone_number?: string;
@@ -73,6 +84,16 @@ export interface CodexAccountNoteUpdate {
   phoneNumber?: string;
   mailUrl?: string;
   chatgptAccountId?: string;
+}
+
+export function isStandardCodexOAuthAccount(account?: CodexAccount | null): boolean {
+  if (!account || isCodexApiKeyAccount(account)) return false;
+  if (isCodexAgentIdentityAccount(account) || isCodexWebSessionAccount(account)) return false;
+  if (isCodexPendingOAuthAccount(account)) return false;
+  const accessToken = account.tokens?.access_token?.trim() || "";
+  const hasRefreshToken = Boolean(account.tokens?.refresh_token?.trim());
+  const hasIdToken = Boolean(account.tokens?.id_token?.trim());
+  return Boolean(accessToken) && !accessToken.startsWith("at-") && (hasRefreshToken || hasIdToken);
 }
 
 export interface CodexBatchDeleteError {
@@ -362,6 +383,62 @@ export interface CodexSessionTokenStats {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+}
+
+export interface CodexSessionUsageTotals {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  requestCount: number;
+  estimatedCostUsd?: number;
+}
+
+export interface CodexSessionUsageBreakdownRow {
+  key: string;
+  label: string;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  requestCount: number;
+}
+
+export interface CodexSessionUsageInstanceOption {
+  id: string;
+  name: string;
+}
+
+export interface CodexSessionUsageQuery {
+  fromTimestamp?: number | null;
+  toTimestamp?: number | null;
+  instanceId?: string | null;
+}
+
+export interface CodexSessionUsageReport {
+  totals: CodexSessionUsageTotals;
+  byModel: CodexSessionUsageBreakdownRow[];
+  byInstance: CodexSessionUsageBreakdownRow[];
+  byDay: CodexSessionUsageBreakdownRow[];
+  instances: CodexSessionUsageInstanceOption[];
+  fromTimestamp?: number | null;
+  toTimestamp?: number | null;
+  lastSyncedAt?: number | null;
+  filesTracked: number;
+  eventCount: number;
+  deferredFiles: number;
+  lastErrorCount: number;
+}
+
+export interface CodexSessionUsageSyncResult {
+  imported: number;
+  skipped: number;
+  filesScanned: number;
+  filesChanged: number;
+  deferredFiles: number;
+  errors: string[];
+  rebuilt: boolean;
+  report?: CodexSessionUsageReport | null;
 }
 
 export interface CodexInstanceTargetThreadSyncSummary {

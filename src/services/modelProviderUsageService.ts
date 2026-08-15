@@ -1,7 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
 
 export type ModelProviderUsageIntegrationType = 'sub2api' | 'new_api';
-export type ModelProviderUsageMode = ModelProviderUsageIntegrationType;
+export type ModelProviderUsageMode =
+  | ModelProviderUsageIntegrationType
+  | 'deepseek'
+  | 'token_plan';
 
 export interface ModelProviderModel {
   id: string;
@@ -87,18 +90,16 @@ export function resolveNewApiQuotaSnapshot(
   return { granted, available, expiresAt };
 }
 
-function buildUsageBaseUrlCandidates(baseUrl: string): string[] {
+export function buildUsageBaseUrlCandidates(baseUrl: string): string[] {
   const trimmed = baseUrl.trim();
   if (!trimmed) return [];
   const candidates = [trimmed];
   try {
     const parsed = new URL(trimmed);
-    const host = parsed.hostname.toLowerCase();
     const path = parsed.pathname.replace(/\/+$/, '');
-    if (
-      (host === 'api.apikey.fun' || host === 'slb.apikey.fun') &&
-      (path === '' || path === '/')
-    ) {
+    if (path === '' || path === '/') {
+      // Sub2API-compatible services may expose /usage at either the host root
+      // or under /v1. Try the user's URL first, then the conventional prefix.
       const usageUrl = `${parsed.origin}/v1`;
       if (!candidates.includes(usageUrl)) candidates.push(usageUrl);
     }
@@ -155,7 +156,12 @@ export function resolveModelProviderUsageMode(
   summary?: ModelProviderUsageSummary,
 ): ModelProviderUsageMode | null {
   if (!summary) return null;
-  if (summary.mode === 'new_api' || summary.mode === 'sub2api') {
+  if (
+    summary.mode === 'new_api' ||
+    summary.mode === 'sub2api' ||
+    summary.mode === 'deepseek' ||
+    summary.mode === 'token_plan'
+  ) {
     return summary.mode;
   }
   if (
@@ -188,8 +194,13 @@ export function formatModelProviderUsageMoney(
 ): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '-';
   const normalizedUnit = unit?.trim() || 'USD';
+  if (normalizedUnit === '%') {
+    return `${Math.round(value)}%`;
+  }
   const formatted = value.toFixed(value >= 100 ? 0 : 2);
-  return normalizedUnit === 'USD' ? `$${formatted}` : `${formatted} ${normalizedUnit}`;
+  if (normalizedUnit === 'USD') return `$${formatted}`;
+  if (normalizedUnit === 'CNY') return `¥${formatted}`;
+  return `${formatted} ${normalizedUnit}`;
 }
 
 export function formatModelProviderUsageInteger(value?: number | null): string {

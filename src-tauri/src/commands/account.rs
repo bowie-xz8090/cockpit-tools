@@ -2,6 +2,7 @@ use crate::error::{AppError, AppResult};
 use crate::models;
 use crate::modules;
 use std::path::PathBuf;
+use std::time::Duration;
 use tauri::AppHandle;
 use tauri::Emitter;
 
@@ -199,6 +200,88 @@ pub async fn add_account(refresh_token: String) -> Result<models::Account, Strin
     modules::websocket::broadcast_data_changed("account_added");
 
     Ok(account)
+}
+
+#[tauri::command]
+pub fn create_pending_oauth_account(
+    email: String,
+    note: Option<String>,
+    two_factor_secret: Option<String>,
+    account_password: Option<String>,
+    phone_number: Option<String>,
+    mail_url: Option<String>,
+) -> Result<models::Account, String> {
+    modules::account::create_pending_oauth_account(
+        email,
+        modules::account::AccountNoteUpdate {
+            note,
+            two_factor_secret,
+            account_password,
+            phone_number,
+            mail_url,
+        },
+    )
+}
+
+const ANTIGRAVITY_MAIL_PREVIEW_MAX_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityMailPreviewFetchResult {
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub body: String,
+    pub truncated: bool,
+}
+
+#[tauri::command]
+pub async fn fetch_account_note_mail_url(
+    mail_url: String,
+) -> Result<AntigravityMailPreviewFetchResult, String> {
+    let mail_url = mail_url.trim();
+    if mail_url.is_empty() {
+        return Err("MAIL_URL_EMPTY".to_string());
+    }
+    let parsed = reqwest::Url::parse(mail_url).map_err(|_| "MAIL_URL_INVALID".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("MAIL_URL_UNSUPPORTED_SCHEME".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("CockpitTools-MailPreview/1.0")
+        .build()
+        .map_err(|e| format!("MAIL_PREVIEW_CLIENT_FAILED: {}", e))?;
+    let response = client
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|e| format!("MAIL_PREVIEW_REQUEST_FAILED: {}", e))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("MAIL_PREVIEW_READ_FAILED: {}", e))?;
+    let truncated = bytes.len() > ANTIGRAVITY_MAIL_PREVIEW_MAX_BYTES;
+    let visible = if truncated {
+        &bytes[..ANTIGRAVITY_MAIL_PREVIEW_MAX_BYTES]
+    } else {
+        &bytes[..]
+    };
+    if !status.is_success() {
+        return Err(format!("MAIL_PREVIEW_HTTP_FAILED:{}", status.as_u16()));
+    }
+    Ok(AntigravityMailPreviewFetchResult {
+        status: status.as_u16(),
+        content_type,
+        body: String::from_utf8_lossy(visible).into_owned(),
+        truncated,
+    })
 }
 
 #[tauri::command]
@@ -646,6 +729,27 @@ pub async fn update_account_notes(
     Ok(account)
 }
 
+#[tauri::command]
+pub async fn update_account_note(
+    account_id: String,
+    note: Option<String>,
+    two_factor_secret: Option<String>,
+    account_password: Option<String>,
+    phone_number: Option<String>,
+    mail_url: Option<String>,
+) -> Result<models::Account, String> {
+    modules::account::update_account_note(
+        &account_id,
+        modules::account::AccountNoteUpdate {
+            note,
+            two_factor_secret,
+            account_password,
+            phone_number,
+            mail_url,
+        },
+    )
+}
+
 /// 从本地客户端同步当前账号状态
 /// 当前实现已禁用“跟随本地客户端当前账号”，保留空结果以兼容旧调用。
 #[tauri::command]
@@ -656,6 +760,30 @@ pub async fn sync_current_from_client(_app: tauri::AppHandle) -> Result<Option<S
 // ─── 账号分组持久化 ────────────────────────────────────────────
 
 const GROUPS_FILE: &str = "account_groups.json";
+
+fn validate_account_groups_payload(data: &str) -> Result<(), String> {
+    let value = serde_json::from_str::<serde_json::Value>(data)
+        .map_err(|e| format!("Invalid groups JSON: {}", e))?;
+    let groups = value
+        .as_array()
+        .ok_or_else(|| "Account groups must be a JSON array".to_string())?;
+
+    for (index, group) in groups.iter().enumerate() {
+        let object = group
+            .as_object()
+            .ok_or_else(|| format!("Account group at index {} must be an object", index))?;
+        if let Some(account_ids) = object.get("accountIds") {
+            if !account_ids.is_array() {
+                return Err(format!(
+                    "Account group at index {} has invalid accountIds",
+                    index
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn load_account_groups() -> Result<String, String> {
@@ -668,20 +796,41 @@ pub async fn load_account_groups() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn save_account_groups(data: String) -> Result<(), String> {
+    validate_account_groups_payload(&data)?;
     let dir = modules::account::get_data_dir()?;
     if !dir.exists() {
         std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create dir: {}", e))?;
     }
     let path = dir.join(GROUPS_FILE);
-    std::fs::write(&path, data).map_err(|e| format!("Failed to write groups: {}", e))
+    modules::atomic_write::write_string_atomic(&path, &data)
+        .map_err(|e| format!("Failed to write groups: {}", e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         normalize_antigravity_runtime_target, resolve_antigravity_switch_flow,
-        AntigravityRuntimeTarget, AntigravitySwitchFlow,
+        validate_account_groups_payload, AntigravityRuntimeTarget, AntigravitySwitchFlow,
     };
+
+    #[test]
+    fn account_groups_payload_must_be_a_json_array() {
+        assert!(validate_account_groups_payload("[]").is_ok());
+        assert!(validate_account_groups_payload(
+            r#"[{"id":"group-1","accountIds":[]}]"#
+        )
+        .is_ok());
+        assert!(validate_account_groups_payload("{}").is_err());
+        assert!(validate_account_groups_payload("not-json").is_err());
+    }
+
+    #[test]
+    fn account_groups_payload_rejects_invalid_account_ids() {
+        assert!(validate_account_groups_payload(
+            r#"[{"id":"group-1","accountIds":{}}]"#
+        )
+        .is_err());
+    }
 
     #[test]
     fn antigravity_switch_flow_uses_legacy_for_legacy_target() {

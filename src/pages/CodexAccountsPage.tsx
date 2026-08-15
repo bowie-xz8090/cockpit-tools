@@ -83,7 +83,6 @@ import { CodexAccountPoolHealthModal } from "../components/CodexAccountPoolHealt
 import {
   type CodexAccountGroup,
   assignAccountsToCodexGroup,
-  cleanupDeletedCodexAccounts,
   deleteCodexGroup,
   getCodexAccountGroups,
   isCodexGroupQuotaRefreshInherit,
@@ -99,6 +98,7 @@ import {
   hasCodexAccountName,
   formatCodexResetTime,
   formatCodexResetTimeAbsolute,
+  getCodexQuotaWindows,
   isCodexApiKeyAccount,
   isCodexAgentIdentityAccount,
   isCodexWebSessionAccount,
@@ -106,8 +106,10 @@ import {
   isCodexNewApiAccount,
   isCodexOpaqueAccessTokenOnlyAccount,
   isCodexPendingOAuthAccount,
+  isStandardCodexOAuthAccount,
   isCodexTeamLikePlan,
   type CodexApiProviderMode,
+  type CodexFingerprintMode,
   type CodexBatchDeleteJobStatus,
   type CodexQuotaErrorInfo,
   type CodexResetCredit,
@@ -127,6 +129,20 @@ import {
   summarizeCodexQuotaErrorMessage,
 } from "../utils/codexQuotaError";
 import { buildCodexAccountPresentation } from "../presentation/platformAccountPresentation";
+import { CodexQuotaMiniRows } from "../components/codex/CodexQuotaMiniRows";
+import {
+  hydrateUserMemory,
+  isUserMemoryDismissed,
+  markUserMemoryDismissed,
+  mergeIdListsPreferExisting,
+  subscribeUserMemory,
+  USER_MEMORY_FLAGS,
+} from "../utils/userMemory";
+import {
+  buildCodexAccountWindowStatQueries,
+  formatCodexWindowStatsText,
+  type CodexWindowStats,
+} from "../utils/codexWindowStats";
 import {
   readCodexImportSyncApiService,
   writeCodexImportSyncApiService,
@@ -156,11 +172,23 @@ import {
 import { CodexInstancesContent } from "./CodexInstancesPage";
 import { CodexSessionManager } from "../components/codex/CodexSessionManager";
 import { CodexCliLaunchDialog } from "../components/codex/CodexCliLaunchDialog";
+import { useDeepSeekDirectModelPrompt } from "../components/codex/DeepSeekDirectModelModal";
+import {
+  isDeepSeekAccount,
+  isCodexTokenPlanAccount,
+  resolveDeepSeekBindAccountId,
+  shouldShowCodexApiKeyUsagePanel,
+} from "../utils/codexDeepSeekAccess";
 import {
   CodexWakeupContent,
   type CodexWakeupTestOpenRequest,
 } from "../components/codex/CodexWakeupContent";
 import { CodexModelProviderManager } from "../components/codex/CodexModelProviderManager";
+import { CodexModelContextWindowTable } from "../components/codex/CodexModelContextWindowTable";
+import {
+  contextWindowDraftsFromRecord,
+  parseContextWindowDrafts,
+} from "../utils/codexModelContextWindows";
 import { CodexSpeedSelect } from "../components/codex/CodexSpeedSelect";
 import { QuickSettingsPopover } from "../components/QuickSettingsPopover";
 import { useProviderAccountsPage } from "../hooks/useProviderAccountsPage";
@@ -208,6 +236,7 @@ import {
   splitCodexImportPayloads,
 } from "../utils/codexJsonImportProgress";
 import { emitAccountsChanged } from "../utils/accountSyncEvents";
+import { resolveCodexModelProviderAccountName } from "../utils/codexModelProviderAccountName";
 import {
   CODEX_OVERVIEW_FILTER_FIELDS,
   CODEX_OVERVIEW_FILTER_SCOPE,
@@ -271,6 +300,7 @@ import {
 } from "../services/codexApiKeyUsageRefreshService";
 import {
   isModelProviderUsageUnavailableError,
+  formatModelProviderUsageMoney,
   listModelProviderModels,
   resolveNewApiQuotaSnapshot,
 } from "../services/modelProviderUsageService";
@@ -395,8 +425,6 @@ const CODEX_LOCAL_ACCESS_EXPANDED_KEY =
   "agtools.codex.local_access_entry_expanded.v1";
 const CODEX_LOCAL_ACCESS_ADDRESS_KIND_KEY =
   "agtools.codex.local_access_address_kind.v1";
-const CODEX_LOCAL_ACCESS_GATEWAY_GUIDE_DISMISSED_KEY =
-  "agtools.codex.api_service.gateway_guide.dismissed.v1";
 const DEFAULT_CODEX_API_PROVIDER_ID = OPENAI_OFFICIAL_PRESET_ID;
 const DEFAULT_CODEX_API_BASE_URL = OPENAI_OFFICIAL_BASE_URL;
 const CODEX_LOCAL_ACCESS_FALLBACK_PORT = 54140;
@@ -601,22 +629,11 @@ function persistLocalAccessAddressKind(
 }
 
 function readLocalAccessGatewayGuideDismissed(): boolean {
-  try {
-    return (
-      localStorage.getItem(CODEX_LOCAL_ACCESS_GATEWAY_GUIDE_DISMISSED_KEY) ===
-      "1"
-    );
-  } catch {
-    return false;
-  }
+  return isUserMemoryDismissed(USER_MEMORY_FLAGS.gatewayGuide);
 }
 
 function persistLocalAccessGatewayGuideDismissed(): void {
-  try {
-    localStorage.setItem(CODEX_LOCAL_ACCESS_GATEWAY_GUIDE_DISMISSED_KEY, "1");
-  } catch {
-    // ignore storage write failures
-  }
+  void markUserMemoryDismissed(USER_MEMORY_FLAGS.gatewayGuide);
 }
 
 const CODEX_BATCH_IMPORT_SESSION_STORAGE_KEY =
@@ -698,9 +715,14 @@ function getCockpitApiStatsRecord(
 
 function resolveApiKeyUsageMode(
   summary?: CodexModelProviderUsageSummary,
-): "new_api" | "sub2api" | null {
+): "new_api" | "sub2api" | "deepseek" | "token_plan" | null {
   if (!summary) return null;
-  if (summary.mode === "new_api" || summary.mode === "sub2api") {
+  if (
+    summary.mode === "new_api" ||
+    summary.mode === "sub2api" ||
+    summary.mode === "deepseek" ||
+    summary.mode === "token_plan"
+  ) {
     return summary.mode;
   }
   if (
@@ -810,6 +832,7 @@ function sanitizeCodexCliInstanceName(value: string): string {
 interface CodexCliLaunchModalState {
   target: "account" | "apiService";
   accountId: string;
+  bindAccountId: string;
   accountLabel: string;
   instanceId: string | null;
   instanceDraft: CodexCliInstanceDraft | null;
@@ -859,6 +882,20 @@ function maskCodexApiKey(value: string): string {
   if (!raw) return raw;
   if (raw.startsWith("sk-")) return "sk-••••••••••••••••";
   return "••••••••••••••••";
+}
+
+/** Distinguish multi-keys under one provider in select UI (name + masked tail). */
+function formatCodexManagedApiKeyOptionLabel(
+  apiKey: { name?: string | null; apiKey: string },
+  unnamedLabel: string,
+): string {
+  const name = apiKey.name?.trim() || unnamedLabel;
+  const raw = apiKey.apiKey.trim();
+  if (!raw) return name;
+  if (raw.length <= 8) {
+    return `${name}（${raw.slice(0, 2)}****）`;
+  }
+  return `${name}（${raw.slice(0, 4)}…${raw.slice(-4)}）`;
 }
 
 function parseApiModelCatalogText(value: string): string[] {
@@ -967,6 +1004,13 @@ export function CodexAccountsPage() {
   const sponsorModule = useSponsorStore((state) => state.state.sponsorModule);
   const fetchSponsorState = useSponsorStore((state) => state.fetchState);
   const [activeTab, setActiveTab] = useState<CodexTab>("overview");
+  const [sessionWindowStats, setSessionWindowStats] = useState<{
+    ready: boolean;
+    byAccountId: Record<
+      string,
+      { primary?: CodexWindowStats; secondary?: CodexWindowStats }
+    >;
+  }>({ ready: false, byAccountId: {} });
   const [wakeupPresetManagerSignal, setWakeupPresetManagerSignal] = useState(0);
   const [fullQuotaWakeupOpenRequest, setFullQuotaWakeupOpenRequest] =
     useState<CodexWakeupTestOpenRequest | null>(null);
@@ -1305,6 +1349,14 @@ export function CodexAccountsPage() {
     setLocalAccessGatewayGuideDismissed,
   ] = useState(readLocalAccessGatewayGuideDismissed);
 
+  useEffect(() => {
+    void hydrateUserMemory().then(() => {
+      if (isUserMemoryDismissed(USER_MEMORY_FLAGS.gatewayGuide)) {
+        setLocalAccessGatewayGuideDismissed(true);
+      }
+    });
+  }, []);
+
   const store = useCodexAccountStore();
   const codexInstanceStore = useCodexInstanceStore();
   const [cliLaunchingAccountId, setCliLaunchingAccountId] = useState<
@@ -1312,6 +1364,7 @@ export function CodexAccountsPage() {
   >(null);
   const [cliLaunchModal, setCliLaunchModal] =
     useState<CodexCliLaunchModalState | null>(null);
+  const deepSeekStart = useDeepSeekDirectModelPrompt();
   const codexCliInstanceDefaultsRef = useRef<InstanceDefaults | null>(null);
   const { terminalOptions, selectedTerminal, setSelectedTerminal } =
     useLaunchTerminalOptions(isCliLaunchSupported);
@@ -1369,6 +1422,21 @@ export function CodexAccountsPage() {
     getMfaTimeRemaining,
   );
   const [savingAccountNote, setSavingAccountNote] = useState(false);
+  const [oauthFingerprintMode, setOauthFingerprintMode] =
+    useState<CodexFingerprintMode>("session");
+  const [fingerprintSettingsAccount, setFingerprintSettingsAccount] =
+    useState<CodexAccount | null>(null);
+  const [fingerprintSettingsAccountIds, setFingerprintSettingsAccountIds] =
+    useState<string[]>([]);
+  const [fingerprintSettingsMode, setFingerprintSettingsMode] =
+    useState<CodexFingerprintMode>("session");
+  const [fingerprintSettingsSaving, setFingerprintSettingsSaving] =
+    useState(false);
+  const {
+    message: fingerprintSettingsError,
+    scrollKey: fingerprintSettingsErrorScrollKey,
+    set: setFingerprintSettingsError,
+  } = useModalErrorState();
   const [savingAppSpeedId, setSavingAppSpeedId] = useState<string | null>(null);
   const [apiServiceAppSpeed, setApiServiceAppSpeed] =
     useState<CodexAppSpeed>("standard");
@@ -1520,6 +1588,7 @@ export function CodexAccountsPage() {
     },
     [],
   );
+
 
   const syncImportedAccountsToApiService = useCallback(
     async (accountIds: string[], force = false) => {
@@ -1866,6 +1935,9 @@ export function CodexAccountsPage() {
       if (!targetAccount) {
         setPendingOAuthEmailInput("");
         setPendingOAuthNoteForm(EMPTY_CODEX_ACCOUNT_NOTE_FORM);
+        setOauthFingerprintMode("session");
+      } else {
+        setOauthFingerprintMode(targetAccount.codex_fingerprint_mode ?? "session");
       }
       setPendingOAuthFieldErrors({});
       setPendingOAuthNoteModalOpen(false);
@@ -1882,6 +1954,7 @@ export function CodexAccountsPage() {
     setReauthEmailCopied(false);
     setPendingOAuthEmailInput("");
     setPendingOAuthNoteForm(EMPTY_CODEX_ACCOUNT_NOTE_FORM);
+    setOauthFingerprintMode("session");
     setPendingOAuthFieldErrors({});
     setPendingOAuthNoteModalOpen(false);
     setPendingWebSessionImport(null);
@@ -2768,6 +2841,7 @@ export function CodexAccountsPage() {
     updateApiKeyCredentials,
     updateApiKeyBoundOAuthAccount,
     updateAccountAppSpeed,
+    updateAccountInstanceAccess,
   } = store;
   const localAccessCollection = localAccessState?.collection ?? null;
 
@@ -3228,6 +3302,65 @@ export function CodexAccountsPage() {
     ],
   );
 
+  const openFingerprintSettingsModal = useCallback((account: CodexAccount) => {
+    setFingerprintSettingsAccount(account);
+    setFingerprintSettingsAccountIds([account.id]);
+    setFingerprintSettingsMode(account.codex_fingerprint_mode ?? "session");
+    setFingerprintSettingsError(null);
+  }, [setFingerprintSettingsError]);
+
+  const openBatchFingerprintSettingsModal = useCallback(() => {
+    const accountIds = Array.from(selected).filter((accountId) =>
+      isStandardCodexOAuthAccount(store.accounts.find((item) => item.id === accountId)),
+    );
+    if (accountIds.length === 0) return;
+    setFingerprintSettingsAccount(null);
+    setFingerprintSettingsAccountIds(accountIds);
+    setFingerprintSettingsMode("session");
+    setFingerprintSettingsError(null);
+  }, [selected, setFingerprintSettingsError, store.accounts]);
+
+  const closeFingerprintSettingsModal = useCallback(() => {
+    if (fingerprintSettingsSaving) return;
+    setFingerprintSettingsAccount(null);
+    setFingerprintSettingsAccountIds([]);
+    setFingerprintSettingsError(null);
+  }, [fingerprintSettingsSaving, setFingerprintSettingsError]);
+
+  const saveFingerprintSettings = useCallback(async () => {
+    if (fingerprintSettingsAccountIds.length === 0 || fingerprintSettingsSaving) return;
+    setFingerprintSettingsSaving(true);
+    setFingerprintSettingsError(null);
+    try {
+      await codexService.updateCodexAccountsFingerprintMode(
+        fingerprintSettingsAccountIds,
+        fingerprintSettingsMode,
+      );
+      await store.fetchAccounts({ allowEmpty: true });
+      setFingerprintSettingsAccount(null);
+      setFingerprintSettingsAccountIds([]);
+      setMessage({
+        text: fingerprintSettingsAccountIds.length === 1
+          ? t("common.codexFingerprint.saved", "设备指纹模式已保存")
+          : t("common.codexFingerprint.batchSaved", {
+              count: fingerprintSettingsAccountIds.length,
+              defaultValue: "已更新 {{count}} 个 OAuth 账号的设备指纹模式",
+            }),
+        tone: "success",
+      });
+    } catch (error) {
+      setFingerprintSettingsError(
+        t("common.codexFingerprint.saveFailed", {
+          error: String(error).replace(/^Error:\s*/, ""),
+          defaultValue: "保存设备指纹模式失败：{{error}}",
+        }),
+      );
+    } finally {
+      setFingerprintSettingsSaving(false);
+    }
+  }, [fingerprintSettingsAccountIds, fingerprintSettingsMode, fingerprintSettingsSaving, setFingerprintSettingsError, setMessage, store, t]);
+  useEscClose(fingerprintSettingsAccountIds.length > 0 && !fingerprintSettingsSaving, closeFingerprintSettingsModal);
+
   const openPendingOAuthNoteModal = useCallback(() => {
     setPendingOAuthNoteModalOpen(true);
     setEditingAccountNoteId(null);
@@ -3538,6 +3671,8 @@ export function CodexAccountsPage() {
     DEFAULT_CODEX_API_BASE_URL,
   );
   const [apiModelCatalogInput, setApiModelCatalogInput] = useState("");
+  const [apiModelContextWindowsInput, setApiModelContextWindowsInput] =
+    useState<Record<string, string>>({});
   const [apiSyncModelCatalogToCodex, setApiSyncModelCatalogToCodex] =
     useState(false);
   const [apiModelCatalogFetching, setApiModelCatalogFetching] = useState(false);
@@ -3555,6 +3690,7 @@ export function CodexAccountsPage() {
     Record<string, CodexApiKeyUsageState>
   >(() => readCodexApiKeyUsageCache());
   const apiKeyUsageInFlightRef = useRef<Set<string>>(new Set());
+  const deepSeekUsageRetryIdsRef = useRef<Set<string>>(new Set());
   const [managedProviderId, setManagedProviderId] = useState<string>("");
   const [managedProviderApiKeyId, setManagedProviderApiKeyId] =
     useState<string>("");
@@ -3583,6 +3719,10 @@ export function CodexAccountsPage() {
   );
   const [editingApiModelCatalogInput, setEditingApiModelCatalogInput] =
     useState("");
+  const [
+    editingApiModelContextWindowsInput,
+    setEditingApiModelContextWindowsInput,
+  ] = useState<Record<string, string>>({});
   const [
     editingApiSyncModelCatalogToCodex,
     setEditingApiSyncModelCatalogToCodex,
@@ -3920,6 +4060,7 @@ export function CodexAccountsPage() {
       providerPresetId: string,
       providerId: string,
       customProviderName: string,
+      managedProviderApiKeyName?: string | null,
     ): {
       apiProviderMode: CodexApiProviderMode;
       apiProviderId?: string;
@@ -3998,7 +4139,10 @@ export function CodexAccountsPage() {
             ),
           ),
           apiVisionRoutingModel: managedProvider.visionRoutingModel,
-          accountName: managedProvider.name,
+          accountName: resolveCodexModelProviderAccountName(
+            managedProvider.name,
+            managedProviderApiKeyName,
+          ),
         };
       }
 
@@ -4086,13 +4230,20 @@ export function CodexAccountsPage() {
   }, [accounts]);
 
   useEffect(() => {
+    return subscribeUserMemory(() => {
+      setCustomSortOrder((prev) =>
+        mergeIdListsPreferExisting(readCodexCustomSortOrder(), prev),
+      );
+    });
+  }, []);
+
+  useEffect(() => {
     if (accounts.length === 0) {
       return;
     }
     const accountIds = accounts.map((account) => account.id);
-    const accountIdSet = new Set(accountIds);
     setCustomSortOrder((prev) => {
-      const next = prev.filter((accountId) => accountIdSet.has(accountId));
+      const next = [...prev];
       const seen = new Set(next);
       for (const accountId of accountIds) {
         if (!seen.has(accountId)) {
@@ -4165,6 +4316,7 @@ export function CodexAccountsPage() {
           ?.modelCatalog ??
         [];
       setApiModelCatalogInput(defaultModels.join("\n"));
+      setApiModelContextWindowsInput({});
       setApiSyncModelCatalogToCodex(false);
       setApiModelCatalogFetching(false);
       setApiModelCatalogError(null);
@@ -4234,18 +4386,35 @@ export function CodexAccountsPage() {
       setManagedProviderApiKeyId("");
       return;
     }
-    if (!managedProviderId) {
-      skipManagedProviderApiKeyAutofillRef.current = false;
-      setManagedProviderApiKeyId("");
-      return;
-    }
-    const matched = findCodexModelProviderById(managedProviders, managedProviderId);
-    if (!matched || !isSameHttpBaseUrl(matched.baseUrl, apiBaseUrlInput)) {
+
+    // Prefer the explicitly selected provider when its base URL still matches;
+    // otherwise auto-link by Base URL so multi-key pickers appear after preset/URL selection.
+    const matchedById = managedProviderId
+      ? findCodexModelProviderById(managedProviders, managedProviderId)
+      : null;
+    const matchedByUrl = apiBaseUrlInput.trim()
+      ? findCodexModelProviderByBaseUrl(managedProviders, apiBaseUrlInput)
+      : null;
+    const matched =
+      matchedById && isSameHttpBaseUrl(matchedById.baseUrl, apiBaseUrlInput)
+        ? matchedById
+        : matchedByUrl;
+
+    if (matched) {
+      if (managedProviderId !== matched.id) {
+        setManagedProviderId(matched.id);
+      }
+    } else if (managedProviderId) {
       skipManagedProviderApiKeyAutofillRef.current = false;
       setManagedProviderId("");
       setManagedProviderApiKeyId("");
       return;
+    } else {
+      skipManagedProviderApiKeyAutofillRef.current = false;
+      setManagedProviderApiKeyId("");
+      return;
     }
+
     if (
       matched.apiKeys.length === 0 ||
       skipManagedProviderApiKeyAutofillRef.current
@@ -4272,23 +4441,39 @@ export function CodexAccountsPage() {
       setEditingManagedProviderApiKeyId("");
       return;
     }
-    if (!editingManagedProviderId) {
-      setEditingManagedProviderApiKeyId("");
-      return;
-    }
-    const matched = findCodexModelProviderById(
-      managedProviders,
-      editingManagedProviderId,
-    );
-    if (
-      !matched ||
-      !isSameHttpBaseUrl(matched.baseUrl, editingApiBaseUrlCredentialsValue)
-    ) {
+
+    const matchedById = editingManagedProviderId
+      ? findCodexModelProviderById(managedProviders, editingManagedProviderId)
+      : null;
+    const matchedByUrl = editingApiBaseUrlCredentialsValue.trim()
+      ? findCodexModelProviderByBaseUrl(
+          managedProviders,
+          editingApiBaseUrlCredentialsValue,
+        )
+      : null;
+    const matched =
+      matchedById &&
+      isSameHttpBaseUrl(
+        matchedById.baseUrl,
+        editingApiBaseUrlCredentialsValue,
+      )
+        ? matchedById
+        : matchedByUrl;
+
+    if (matched) {
+      if (editingManagedProviderId !== matched.id) {
+        setEditingManagedProviderId(matched.id);
+      }
+    } else if (editingManagedProviderId) {
       setEditingManagedProviderId("");
       setEditingManagedProviderApiKeyId("");
       return;
+    } else {
+      setEditingManagedProviderApiKeyId("");
+      return;
     }
-    if (!matched || matched.apiKeys.length === 0) {
+
+    if (matched.apiKeys.length === 0) {
       setEditingManagedProviderApiKeyId("");
       return;
     }
@@ -4505,6 +4690,12 @@ export function CodexAccountsPage() {
   const completeOauthSuccess = useCallback(
     async (account?: CodexAccount | null) => {
       oauthLog("授权完成并保存成功", { loginId: oauthLoginIdRef.current });
+      if (account?.id) {
+        await codexService.updateCodexAccountsFingerprintMode(
+          [account.id],
+          oauthFingerprintMode,
+        );
+      }
       await fetchAccounts();
       await fetchCurrentAccount();
       if (!reauthTargetAccountId) {
@@ -4558,6 +4749,7 @@ export function CodexAccountsPage() {
       syncImportedAccountsToApiService,
       t,
       oauthLog,
+      oauthFingerprintMode,
       setAddStatus,
       setAddMessage,
       setShowAddModal,
@@ -5242,6 +5434,17 @@ export function CodexAccountsPage() {
       return;
     }
     try {
+      if (account && isDeepSeekAccount(account)) {
+        const presentation = buildCodexAccountPresentation(account, t);
+        const prepared = await deepSeekStart.confirmStart(
+          account,
+          updateAccountInstanceAccess,
+          presentation.displayName || account.email || account.id,
+        );
+        if (!prepared) {
+          return;
+        }
+      }
       await executeCodexAccountSwitch(accountId);
     } catch (e) {
       setMessage({
@@ -5418,7 +5621,7 @@ export function CodexAccountsPage() {
     const bindAccountId =
       modal.target === "apiService"
         ? CODEX_API_SERVICE_BIND_ID
-        : modal.accountId;
+        : modal.bindAccountId || modal.accountId;
     const cached = findCachedCodexCliInstance(
       bindAccountId,
       normalizedWorkingDir,
@@ -5592,12 +5795,14 @@ export function CodexAccountsPage() {
     target: "account" | "apiService",
     accountId: string,
     accountLabel: string,
+    bindAccountId?: string,
   ) => {
     if (cliLaunchModal || cliLaunchingAccountId) return;
     setMessage(null);
     const modal: CodexCliLaunchModalState = {
       target,
       accountId,
+      bindAccountId: bindAccountId || accountId,
       accountLabel,
       instanceId: null,
       instanceDraft: null,
@@ -5619,7 +5824,7 @@ export function CodexAccountsPage() {
     }
   };
 
-  const handleLaunchCodexCli = (account: CodexAccount) => {
+  const handleLaunchCodexCli = async (account: CodexAccount) => {
     const blockedReason = getCodexSwitchOrLaunchBlockedReason(account);
     if (blockedReason) {
       setMessage({
@@ -5638,11 +5843,33 @@ export function CodexAccountsPage() {
       });
       return;
     }
-    const presentation = buildCodexAccountPresentation(account, t);
+    let launchAccount = account;
+    if (isDeepSeekAccount(account)) {
+      const presentation = buildCodexAccountPresentation(account, t);
+      try {
+        const prepared = await deepSeekStart.confirmStart(
+          account,
+          updateAccountInstanceAccess,
+          presentation.displayName || account.email || account.id,
+        );
+        if (!prepared) return;
+        launchAccount = prepared;
+      } catch (error) {
+        setMessage({
+          text: `${t("common.failed", "失败")}: ${String(error).replace(/^Error:\s*/, "")}`,
+          tone: "error",
+        });
+        return;
+      }
+    }
+    const presentation = buildCodexAccountPresentation(launchAccount, t);
     openCodexCliLaunchModal(
       "account",
-      account.id,
-      presentation.displayName || account.email || account.id,
+      launchAccount.id,
+      presentation.displayName || launchAccount.email || launchAccount.id,
+      isDeepSeekAccount(launchAccount)
+        ? resolveDeepSeekBindAccountId(launchAccount)
+        : launchAccount.id,
     );
   };
 
@@ -6387,6 +6614,7 @@ export function CodexAccountsPage() {
         setApiBaseUrlInput("");
         setNewManagedProviderNameInput("");
         setApiModelCatalogInput("");
+        setApiModelContextWindowsInput({});
         return;
       }
       const sponsorTemplate = sponsorApiProviderTemplates.find(
@@ -6396,6 +6624,7 @@ export function CodexAccountsPage() {
         setApiBaseUrlInput(sponsorTemplate.baseUrl);
         setNewManagedProviderNameInput(sponsorTemplate.name);
         setApiModelCatalogInput(sponsorTemplate.modelCatalog.join("\n"));
+        setApiModelContextWindowsInput({});
         return;
       }
       const preset = findCodexApiProviderPresetById(providerId);
@@ -6403,6 +6632,7 @@ export function CodexAccountsPage() {
       setApiBaseUrlInput(preset.baseUrls[0]);
       setNewManagedProviderNameInput("");
       setApiModelCatalogInput((preset.modelCatalog ?? []).join("\n"));
+      setApiModelContextWindowsInput({});
       if (providerId === OPENAI_OFFICIAL_PRESET_ID) {
         setApiSyncModelCatalogToCodex(false);
       }
@@ -6419,6 +6649,12 @@ export function CodexAccountsPage() {
       if (!provider) return;
       setApiBaseUrlInput(provider.baseUrl);
       setApiModelCatalogInput((provider.modelCatalog ?? []).join("\n"));
+      setApiModelContextWindowsInput(
+        contextWindowDraftsFromRecord(
+          provider.modelContextWindows,
+          provider.modelCatalog ?? [],
+        ),
+      );
       setApiModelCatalogError(null);
       const firstKey = provider.apiKeys[0];
       if (firstKey) {
@@ -6436,6 +6672,12 @@ export function CodexAccountsPage() {
   const handleSelectManagedProviderApiKey = useCallback(
     (apiKeyId: string) => {
       setManagedProviderApiKeyId(apiKeyId);
+      if (!apiKeyId.trim()) {
+        // Manual entry: clear prefilled secret so user can paste a new key.
+        setApiKeyInput("");
+        setApiKeyInputVisible(true);
+        return;
+      }
       const key = selectedManagedProvider?.apiKeys.find(
         (item) => item.id === apiKeyId,
       );
@@ -6574,6 +6816,7 @@ export function CodexAccountsPage() {
       sponsorTemplate?.name ?? request.providerName?.trim() ?? "APIKEY.FUN",
     );
     setApiModelCatalogInput((request.modelCatalog ?? []).join("\n"));
+    setApiModelContextWindowsInput({});
     setApiModelCatalogError(null);
     setAddStatus("idle");
     setAddMessage(
@@ -6614,11 +6857,13 @@ export function CodexAccountsPage() {
       setEditingApiModelCatalogError(null);
       if (providerId === CODEX_API_PROVIDER_CUSTOM_ID) {
         setEditingApiModelCatalogInput("");
+        setEditingApiModelContextWindowsInput({});
       }
       const preset = findCodexApiProviderPresetById(providerId);
       if (!preset || preset.baseUrls.length === 0) return;
       setEditingApiBaseUrlCredentialsValue(preset.baseUrls[0]);
       setEditingApiModelCatalogInput((preset.modelCatalog ?? []).join("\n"));
+      setEditingApiModelContextWindowsInput({});
       if (providerId === OPENAI_OFFICIAL_PRESET_ID) {
         setEditingApiSyncModelCatalogToCodex(false);
       }
@@ -6634,6 +6879,12 @@ export function CodexAccountsPage() {
       if (!provider) return;
       setEditingApiBaseUrlCredentialsValue(provider.baseUrl);
       setEditingApiModelCatalogInput((provider.modelCatalog ?? []).join("\n"));
+      setEditingApiModelContextWindowsInput(
+        contextWindowDraftsFromRecord(
+          provider.modelContextWindows,
+          provider.modelCatalog ?? [],
+        ),
+      );
       setEditingApiModelCatalogError(null);
       const firstKey = provider.apiKeys[0];
       if (firstKey) {
@@ -6651,6 +6902,11 @@ export function CodexAccountsPage() {
   const handleSelectEditingManagedProviderApiKey = useCallback(
     (apiKeyId: string) => {
       setEditingManagedProviderApiKeyId(apiKeyId);
+      if (!apiKeyId.trim()) {
+        setEditingApiKeyCredentialsValue("");
+        setEditingApiKeyCredentialsVisible(true);
+        return;
+      }
       const key = selectedEditingManagedProvider?.apiKeys.find(
         (item) => item.id === apiKeyId,
       );
@@ -6818,6 +7074,11 @@ export function CodexAccountsPage() {
         selectedQuickSwitchProvider.wireApi ?? undefined,
         selectedQuickSwitchProvider.supportsWebsockets,
         quickSwitchAccount.api_sync_model_catalog_to_codex === true,
+        resolveCodexModelProviderAccountName(
+          selectedQuickSwitchProvider.name,
+          selectedQuickSwitchApiKey.name,
+        ),
+        selectedQuickSwitchProvider.modelContextWindows,
       );
       setMessage({
         text: t("codex.quickSwitch.success", {
@@ -6880,6 +7141,19 @@ export function CodexAccountsPage() {
       );
       return;
     }
+    const parsedWindows = parseContextWindowDrafts(
+      apiModelContextWindowsInput,
+      apiModelCatalogDraft,
+    );
+    if (!parsedWindows.ok) {
+      setApiModelCatalogError(
+        t(
+          "codex.api.modelCatalog.contextWindowInvalid",
+          "上下文窗口必须是大于 0 的整数",
+        ),
+      );
+      return;
+    }
     setApiModelCatalogError(null);
     const existingApiKeyAccount = accounts.find(
       (account) =>
@@ -6892,8 +7166,10 @@ export function CodexAccountsPage() {
         apiProviderPresetId,
         managedProviderId,
         newManagedProviderNameInput,
+        selectedManagedProviderApiKey?.name,
       ),
       apiModelCatalog: apiModelCatalogDraft,
+      apiModelContextWindows: parsedWindows.windows,
     };
 
     page.setAddStatus("loading");
@@ -6921,6 +7197,7 @@ export function CodexAccountsPage() {
             apiKeyName: providerPayload.accountName,
             sourceTag: providerPayload.sponsorTemplate?.id ?? null,
             modelCatalog: providerPayload.apiModelCatalog,
+            modelContextWindows: providerPayload.apiModelContextWindows,
             supportsVision: providerPayload.sponsorTemplate?.supportsVision,
             website: providerPayload.sponsorTemplate?.website,
             apiKeyUrl: providerPayload.sponsorTemplate?.apiKeyUrl,
@@ -6936,7 +7213,7 @@ export function CodexAccountsPage() {
             apiSupportsVision: savedProvider.supportsVision,
             apiWireApi: savedProvider.wireApi ?? undefined,
             apiSupportsWebsockets: savedProvider.supportsWebsockets,
-            accountName: savedProvider.name,
+            accountName: providerPayload.accountName || savedProvider.name,
           };
           try {
             const usageSummary = await queryCodexModelProviderUsage({
@@ -6980,6 +7257,7 @@ export function CodexAccountsPage() {
         finalProviderPayload.apiWireApi,
         finalProviderPayload.apiSupportsWebsockets,
         apiSyncModelCatalogToCodex,
+        parsedWindows.windows,
       );
       await fetchAccounts();
       await fetchCurrentAccount();
@@ -7002,10 +7280,18 @@ export function CodexAccountsPage() {
       }
       page.setAddStatus("success");
       page.setAddMessage(
-        t("codex.import.successMsg", "导入成功: {{email}}").replace(
+        `${t("codex.import.successMsg", "导入成功: {{email}}").replace(
           "{{email}}",
           maskAccountText(account.email),
-        ),
+        )}${
+          Object.keys(parsedWindows.windows).length > 0 ||
+          apiSyncModelCatalogToCodex
+            ? ` ${t(
+                "codex.api.modelCatalog.restartHint",
+                "模型目录已更新。若 Codex 正在运行，请重启后生效。",
+              )}`
+            : ""
+        }`,
       );
       setApiKeyInput("");
       setApiBaseUrlInput(DEFAULT_CODEX_API_BASE_URL);
@@ -7368,7 +7654,11 @@ export function CodexAccountsPage() {
 
   const refreshApiKeyUsage = useCallback(
     async (account: CodexAccount, provider?: CodexModelProvider | null) => {
-      if (isCodexChatCompletionsApiKeyAccount(account)) {
+      if (
+        isCodexChatCompletionsApiKeyAccount(account) &&
+        !isDeepSeekAccount(account) &&
+        !isCodexTokenPlanAccount(account)
+      ) {
         return;
       }
       const targetProvider =
@@ -7438,7 +7728,9 @@ export function CodexAccountsPage() {
       if (
         !isCodexApiKeyAccount(account) ||
         isCodexNewApiAccount(account) ||
-        isCodexChatCompletionsApiKeyAccount(account)
+        (isCodexChatCompletionsApiKeyAccount(account) &&
+          !isDeepSeekAccount(account) &&
+          !isCodexTokenPlanAccount(account))
       ) {
         return false;
       }
@@ -7460,10 +7752,16 @@ export function CodexAccountsPage() {
       const state = apiKeyUsageMap[account.id];
       if (
         state?.loading ||
-        state?.unavailable ||
         apiKeyUsageInFlightRef.current.has(account.id)
       ) {
         return false;
+      }
+      if (state?.unavailable) {
+        return (
+          isDeepSeekAccount(account) &&
+          !state.summary &&
+          !deepSeekUsageRetryIdsRef.current.has(account.id)
+        );
       }
       return !state?.updatedAt;
     },
@@ -7496,6 +7794,22 @@ export function CodexAccountsPage() {
   }, [apiKeyUsageMap]);
 
   useEffect(() => {
+    for (const account of accounts) {
+      const provider = resolveUsageProviderForApiKeyAccount(account);
+      if (!shouldAutoRefreshApiKeyUsage(account, provider)) continue;
+      if (isDeepSeekAccount(account)) {
+        deepSeekUsageRetryIdsRef.current.add(account.id);
+      }
+      void refreshApiKeyUsage(account, provider);
+    }
+  }, [
+    accounts,
+    refreshApiKeyUsage,
+    resolveUsageProviderForApiKeyAccount,
+    shouldAutoRefreshApiKeyUsage,
+  ]);
+
+  useEffect(() => {
     const syncUsageCache = () => setApiKeyUsageMap(readCodexApiKeyUsageCache());
     window.addEventListener(CODEX_API_KEY_USAGE_REFRESHED_EVENT, syncUsageCache);
     return () =>
@@ -7509,7 +7823,12 @@ export function CodexAccountsPage() {
     const accountIds = new Set(accounts.map((account) => account.id));
     const chatCompletionsAccountIds = new Set(
       accounts
-        .filter((account) => isCodexChatCompletionsApiKeyAccount(account))
+        .filter(
+          (account) =>
+            isCodexChatCompletionsApiKeyAccount(account) &&
+            !isDeepSeekAccount(account) &&
+            !isCodexTokenPlanAccount(account),
+        )
         .map((account) => account.id),
     );
     setApiKeyUsageMap((previous) => {
@@ -7572,28 +7891,9 @@ export function CodexAccountsPage() {
   }, [refreshApiKeyUsageByAccountId]);
 
   const formatApiKeyUsageMoney = useCallback(
-    (value?: number | null, unit?: string | null): string => {
-      if (typeof value !== "number" || !Number.isFinite(value)) return "-";
-      const normalizedUnit = unit?.trim() || "USD";
-      const formatted = value.toFixed(value >= 100 ? 0 : 2);
-      return normalizedUnit === "USD"
-        ? `$${formatted}`
-        : `${formatted} ${normalizedUnit}`;
-    },
+    (value?: number | null, unit?: string | null): string =>
+      formatModelProviderUsageMoney(value ?? undefined, unit ?? undefined),
     [],
-  );
-
-  const formatApiKeyUsageBalance = useCallback(
-    (summary?: CodexModelProviderUsageSummary): string | null => {
-      if (
-        typeof summary?.balance !== "number" ||
-        !Number.isFinite(summary.balance)
-      ) {
-        return null;
-      }
-      return formatApiKeyUsageMoney(summary.balance, summary.unit);
-    },
-    [formatApiKeyUsageMoney],
   );
 
   const formatApiKeyUsageQuotaValue = useCallback(
@@ -7673,6 +7973,39 @@ export function CodexAccountsPage() {
   const formatApiKeyUsageDetailLabel = useCallback(
     (key: string, fallback: string): string => {
       const labels: Record<string, string> = {
+        modelName: t("codex.modelProviders.usage.fields.modelName", "Model"),
+        intervalRemaining: t(
+          "codex.modelProviders.usage.fields.intervalRemaining",
+          "Interval Remaining",
+        ),
+        intervalLimit: t(
+          "codex.modelProviders.usage.fields.intervalLimit",
+          "Interval Limit",
+        ),
+        intervalRemainingPercent: t(
+          "codex.modelProviders.usage.fields.intervalRemainingPercent",
+          "Interval Remaining %",
+        ),
+        intervalExpiresAt: t(
+          "codex.modelProviders.usage.fields.intervalExpiresAt",
+          "Interval Reset",
+        ),
+        weeklyRemaining: t(
+          "codex.modelProviders.usage.fields.weeklyRemaining",
+          "Weekly Remaining",
+        ),
+        weeklyLimit: t(
+          "codex.modelProviders.usage.fields.weeklyLimit",
+          "Weekly Limit",
+        ),
+        weeklyRemainingPercent: t(
+          "codex.modelProviders.usage.fields.weeklyRemainingPercent",
+          "Weekly Remaining %",
+        ),
+        weeklyExpiresAt: t(
+          "codex.modelProviders.usage.fields.weeklyExpiresAt",
+          "Weekly Reset",
+        ),
         status: t("codex.modelProviders.usage.fields.status", "状态"),
         planName: t("codex.modelProviders.usage.fields.planName", "订阅"),
         remaining: t("codex.modelProviders.usage.fields.remaining", "剩余额度"),
@@ -7732,6 +8065,11 @@ export function CodexAccountsPage() {
           "codex.modelProviders.usage.fields.totalUsage",
           "累计消耗",
         ),
+        isAvailable: t("codex.modelProviders.usage.fields.isAvailable", "余额可用"),
+        currency: t("codex.modelProviders.usage.fields.currency", "币种"),
+        totalBalance: t("codex.modelProviders.usage.fields.totalBalance", "总余额"),
+        grantedBalance: t("codex.modelProviders.usage.fields.grantedBalance", "赠金余额"),
+        toppedUpBalance: t("codex.modelProviders.usage.fields.toppedUpBalance", "充值余额"),
       };
       return labels[key] ?? fallback;
     },
@@ -7756,7 +8094,17 @@ export function CodexAccountsPage() {
       if (Number.isFinite(numeric) && item.key === "expiresAt") {
         return numeric > 0 ? formatDate(numeric * 1000) : "-";
       }
-      if (item.key === "quotaUnlimited" || item.key === "modelLimitsEnabled") {
+      if (
+        Number.isFinite(numeric) &&
+        (item.key === "intervalExpiresAt" || item.key === "weeklyExpiresAt")
+      ) {
+        return numeric > 0 ? formatDate(numeric * 1000) : "-";
+      }
+      if (
+        item.key === "quotaUnlimited" ||
+        item.key === "modelLimitsEnabled" ||
+        item.key === "isAvailable"
+      ) {
         if (raw === "true")
           return t("codex.modelProviders.usage.booleanTrue", "是");
         if (raw === "false")
@@ -7772,6 +8120,9 @@ export function CodexAccountsPage() {
           "hardLimitUsd",
           "softLimitUsd",
           "systemHardLimitUsd",
+          "totalBalance",
+          "grantedBalance",
+          "toppedUpBalance",
         ].includes(item.key)
       ) {
         return formatApiKeyUsageMoney(numeric, unit);
@@ -7822,7 +8173,11 @@ export function CodexAccountsPage() {
       provider: CodexModelProvider | null,
       variant: "card" | "table" = "card",
     ): ReactElement => {
-      if (isCodexChatCompletionsApiKeyAccount(account)) {
+      if (
+        isCodexChatCompletionsApiKeyAccount(account) &&
+        !isDeepSeekAccount(account) &&
+        !isCodexTokenPlanAccount(account)
+      ) {
         return <></>;
       }
       const usageState = apiKeyUsageMap[account.id];
@@ -7833,9 +8188,55 @@ export function CodexAccountsPage() {
         provider?.baseUrl.trim() || (account.api_base_url || "").trim();
       const canRefresh = Boolean(apiKey && baseUrl);
       const usageMode = resolveApiKeyUsageMode(summary);
+      const isDeepSeekUsage =
+        isDeepSeekAccount(account) || usageMode === "deepseek";
       const isNewApiUsage = usageMode === "new_api";
       const isSub2ApiUsage = usageMode === "sub2api";
+      const isTokenPlanUsage = usageMode === "token_plan";
       const usedPercent = formatApiKeyUsagePercent(summary);
+      if (isDeepSeekUsage) {
+        return (
+          <div className={`codex-api-key-usage-panel ${variant} sub2api`}>
+            <div className="codex-api-key-usage-grid">
+              <div>
+                <span>
+                  {t("codex.modelProviders.usage.fields.totalBalance", "总余额")}
+                </span>
+                <strong>
+                  {formatApiKeyUsageMoney(summary?.balance, summary?.unit)}
+                </strong>
+              </div>
+              <div>
+                <span>
+                  {t(
+                    "codex.modelProviders.usage.fields.grantedBalance",
+                    "赠金余额",
+                  )}
+                </span>
+                <strong>
+                  {formatApiKeyUsageDetailByKey(summary, "grantedBalance")}
+                </strong>
+              </div>
+              <div>
+                <span>
+                  {t(
+                    "codex.modelProviders.usage.fields.toppedUpBalance",
+                    "充值余额",
+                  )}
+                </span>
+                <strong>
+                  {formatApiKeyUsageDetailByKey(summary, "toppedUpBalance")}
+                </strong>
+              </div>
+            </div>
+            {!summary && usageState?.error ? (
+              <div className="codex-api-key-usage-empty">
+                {t("common.shared.quota.queryFailed", "配额查询失败")}
+              </div>
+            ) : null}
+          </div>
+        );
+      }
       if (variant === "card" && summary && isNewApiUsage) {
         const quota = resolveNewApiQuotaSnapshot(summary);
         const grantedText = formatApiKeyUsageMoney(quota.granted, summary.unit);
@@ -7879,6 +8280,54 @@ export function CodexAccountsPage() {
               <span className="quota-reset">
                 {t("codex.modelProviders.usage.fields.expiresAt", "过期时间")}：
                 {expiresText}
+              </span>
+            )}
+          </div>
+        );
+      }
+      if (variant === "card" && summary && isTokenPlanUsage) {
+        const resetDetail =
+          findApiKeyUsageDetail(summary, "intervalExpiresAt") ??
+          findApiKeyUsageDetail(summary, "weeklyExpiresAt") ??
+          findApiKeyUsageDetail(summary, "expiresAt");
+        return (
+          <div
+            className="quota-item codex-api-key-quota-item token-plan"
+            title={`${t(
+              "codex.modelProviders.usage.fields.remaining",
+              "Remaining",
+            )}: ${formatApiKeyUsageQuotaValue(
+              summary,
+              summary.quotaRemaining ?? summary.remaining,
+            )}`}
+          >
+            <div className="quota-header">
+              <Database size={14} />
+              <span className="quota-label">
+                {t("codex.modelProviders.usage.fields.planName", "Token Plan")}
+              </span>
+              <span className="quota-pct high">
+                {formatApiKeyUsageQuotaValue(
+                  summary,
+                  summary.quotaRemaining ?? summary.remaining,
+                )}
+              </span>
+            </div>
+            <div className="quota-bar-track">
+              <div
+                className="quota-bar high"
+                style={{ width: `${Math.max(0, Math.min(100, usedPercent))}%` }}
+              />
+            </div>
+            {(summary.planName || resetDetail) && (
+              <span className="quota-reset">
+                {summary.planName || "Token Plan"}
+                {resetDetail
+                  ? ` · ${formatApiKeyUsageDetailValue(
+                      resetDetail,
+                      summary.unit,
+                    )}`
+                  : ""}
               </span>
             )}
           </div>
@@ -7937,7 +8386,20 @@ export function CodexAccountsPage() {
           {summary ? (
             <>
               <div className="codex-api-key-usage-grid">
-                {isNewApiUsage ? (
+                {isDeepSeekUsage ? (
+                  <>
+                    {[
+                      ["totalBalance", "总余额"],
+                      ["grantedBalance", "赠金余额"],
+                      ["toppedUpBalance", "充值余额"],
+                    ].map(([key, fallback]) => (
+                      <div key={key}>
+                        <span>{formatApiKeyUsageDetailLabel(key, fallback)}</span>
+                        <strong>{formatApiKeyUsageDetailByKey(summary, key)}</strong>
+                      </div>
+                    ))}
+                  </>
+                ) : isNewApiUsage ? (
                   <>
                     <div>
                       <span>
@@ -7995,6 +8457,50 @@ export function CodexAccountsPage() {
                       </strong>
                     </div>
                   </>
+                ) : isTokenPlanUsage ? (
+                  <>
+                    <div>
+                      <span>
+                        {t(
+                          "codex.modelProviders.usage.fields.remaining",
+                          "Remaining",
+                        )}
+                      </span>
+                      <strong>
+                        {formatApiKeyUsageQuotaValue(
+                          summary,
+                          summary.quotaRemaining ?? summary.remaining,
+                        )}
+                      </strong>
+                    </div>
+                    <div>
+                      <span>
+                        {t(
+                          "codex.modelProviders.usage.fields.planName",
+                          "Plan",
+                        )}
+                      </span>
+                      <strong>{summary.planName || "-"}</strong>
+                    </div>
+                    <div>
+                      <span>
+                        {t(
+                          "codex.modelProviders.usage.fields.expiresAt",
+                          "Next Reset",
+                        )}
+                      </span>
+                      <strong>
+                        {formatApiKeyUsageDetailByKey(
+                          summary,
+                          findApiKeyUsageDetail(summary, "intervalExpiresAt")
+                            ? "intervalExpiresAt"
+                            : findApiKeyUsageDetail(summary, "weeklyExpiresAt")
+                              ? "weeklyExpiresAt"
+                              : "expiresAt",
+                        )}
+                      </strong>
+                    </div>
+                  </>
                 ) : isSub2ApiUsage ? (
                   <>
                     <div>
@@ -8040,7 +8546,7 @@ export function CodexAccountsPage() {
                   </>
                 ) : null}
               </div>
-              {isNewApiUsage ? (
+              {isNewApiUsage || isTokenPlanUsage ? (
                 <div className="codex-api-key-usage-progress">
                   <div className="cockpit-api-progress-track">
                     <div
@@ -8070,12 +8576,10 @@ export function CodexAccountsPage() {
       apiKeyUsageMap,
       formatApiKeyUsagePercent,
       formatApiKeyUsageMoney,
-      formatApiKeyUsageBalance,
       formatApiKeyUsageQuotaValue,
+      formatApiKeyUsageDetailLabel,
+      formatApiKeyUsageDetailValue,
       formatApiKeyUsageDetailByKey,
-      canRefreshApiKeyUsage,
-      refreshApiKeyUsage,
-      setApiKeyUsageDetailAccountId,
       t,
     ],
   );
@@ -8091,6 +8595,7 @@ export function CodexAccountsPage() {
     setEditingManagedProviderApiKeyId("");
     setEditingNewManagedProviderNameInput("");
     setEditingApiModelCatalogInput("");
+    setEditingApiModelContextWindowsInput({});
     setEditingApiSyncModelCatalogToCodex(false);
     setEditingApiModelCatalogFetching(false);
     setEditingApiModelCatalogError(null);
@@ -8126,6 +8631,13 @@ export function CodexAccountsPage() {
       setEditingApiModelCatalogInput(
         (account.api_model_catalog ?? matchedProvider?.modelCatalog ?? []).join(
           "\n",
+        ),
+      );
+      setEditingApiModelContextWindowsInput(
+        contextWindowDraftsFromRecord(
+          account.api_model_context_windows ??
+            matchedProvider?.modelContextWindows,
+          account.api_model_catalog ?? matchedProvider?.modelCatalog ?? [],
         ),
       );
       setEditingApiSyncModelCatalogToCodex(
@@ -8164,6 +8676,19 @@ export function CodexAccountsPage() {
       );
       return;
     }
+    const parsedWindows = parseContextWindowDrafts(
+      editingApiModelContextWindowsInput,
+      editingApiModelCatalogDraft,
+    );
+    if (!parsedWindows.ok) {
+      setEditingApiModelCatalogError(
+        t(
+          "codex.api.modelCatalog.contextWindowInvalid",
+          "上下文窗口必须是大于 0 的整数",
+        ),
+      );
+      return;
+    }
     setEditingApiModelCatalogError(null);
     const editingAccount = accounts.find((account) => account.id === accountId);
     const providerPayload = {
@@ -8172,8 +8697,10 @@ export function CodexAccountsPage() {
         editingApiProviderPresetId,
         editingManagedProviderId,
         editingNewManagedProviderNameInput,
+        selectedEditingManagedProviderApiKey?.name,
       ),
       apiModelCatalog: editingApiModelCatalogDraft,
+      apiModelContextWindows: parsedWindows.windows,
     };
 
     setSavingApiKeyCredentials(true);
@@ -8192,6 +8719,8 @@ export function CodexAccountsPage() {
         providerPayload.apiWireApi,
         providerPayload.apiSupportsWebsockets,
         editingApiSyncModelCatalogToCodex,
+        providerPayload.accountName,
+        parsedWindows.windows,
       );
       if (
         validation.apiBaseUrl &&
@@ -8213,6 +8742,7 @@ export function CodexAccountsPage() {
             apiKeyName: providerPayload.accountName,
             sourceTag: providerPayload.sponsorTemplate?.id ?? null,
             modelCatalog: providerPayload.apiModelCatalog,
+            modelContextWindows: providerPayload.apiModelContextWindows,
             supportsVision: providerPayload.sponsorTemplate?.supportsVision,
             website: providerPayload.sponsorTemplate?.website,
             apiKeyUrl: providerPayload.sponsorTemplate?.apiKeyUrl,
@@ -8247,7 +8777,16 @@ export function CodexAccountsPage() {
           );
         }
       }
-      setMessage({ text: t("instances.messages.updated", "实例已更新") });
+      setMessage({
+        text:
+          Object.keys(parsedWindows.windows).length > 0 ||
+          editingApiSyncModelCatalogToCodex
+            ? `${t("instances.messages.updated", "实例已更新")} ${t(
+                "codex.api.modelCatalog.restartHint",
+                "模型目录已更新。若 Codex 正在运行，请重启后生效。",
+              )}`
+            : t("instances.messages.updated", "实例已更新"),
+      });
       setApiKeyUsageMap((previous) => {
         const next = { ...previous };
         delete next[accountId];
@@ -8278,6 +8817,7 @@ export function CodexAccountsPage() {
     editingApiKeyCredentialsId,
     editingApiKeyCredentialsValue,
     editingApiModelCatalogDraft,
+    editingApiModelContextWindowsInput,
     editingApiProviderPresetId,
     editingApiSyncModelCatalogToCodex,
     editingManagedProviderId,
@@ -9020,6 +9560,37 @@ export function CodexAccountsPage() {
     [addingLocalAccessAccountId, ensureLocalAccessEntryVisible, setMessage, t],
   );
 
+  const handleRemoveLocalAccessAccount = useCallback(
+    async (accountId: string) => {
+      if (addingLocalAccessAccountId) return;
+      setAddingLocalAccessAccountId(accountId);
+      try {
+        const nextState =
+          await codexLocalAccessService.removeCodexLocalAccessAccount(accountId);
+        setLocalAccessState(nextState);
+        window.dispatchEvent(new Event("codex-local-access-state-updated"));
+        setMessage({
+          text: t(
+            "codex.localAccess.removeSuccess",
+            "已从 API 服务移除该账号",
+          ),
+        });
+      } catch (error) {
+        console.error("Failed to remove account from API service:", error);
+        setMessage({
+          text: t("messages.actionFailed", {
+            action: t("codex.localAccess.removeAction", "移除 API 服务"),
+            error: String(error).replace(/^Error:\s*/, ""),
+          }),
+          tone: "error",
+        });
+      } finally {
+        setAddingLocalAccessAccountId(null);
+      }
+    },
+    [addingLocalAccessAccountId, setMessage, t],
+  );
+
   const renderAddLocalAccessAccountButton = (
     account: CodexAccount,
     className: string,
@@ -9318,28 +9889,6 @@ export function CodexAccountsPage() {
       setBatchImportTargetGroupId(null);
     }
   }, [batchImportTargetGroupId, codexGroups]);
-
-  useEffect(() => {
-    const existingAccountIds = new Set(accounts.map((account) => account.id));
-    const hasStaleAccountIds = codexGroups.some((group) =>
-      group.accountIds.some((accountId) => !existingAccountIds.has(accountId)),
-    );
-    if (!hasStaleAccountIds) {
-      return;
-    }
-
-    void (async () => {
-      try {
-        await cleanupDeletedCodexAccounts(existingAccountIds);
-        await reloadCodexGroups();
-      } catch (error) {
-        console.error(
-          "Failed to clean up deleted Codex accounts from groups:",
-          error,
-        );
-      }
-    })();
-  }, [accounts, codexGroups, reloadCodexGroups]);
 
   const handleEnterGroup = useCallback(
     (groupId: string) => {
@@ -9898,6 +10447,105 @@ export function CodexAccountsPage() {
   const overviewCurrentAccountId = localAccessLaunchCurrent
     ? null
     : (currentAccount?.id ?? null);
+
+  useEffect(() => {
+    if (activeTab !== "overview") {
+      setSessionWindowStats({ ready: false, byAccountId: {} });
+      return;
+    }
+    const memberAccounts = (localAccessCollection?.accountIds ?? [])
+      .map((accountId) => accounts.find((account) => account.id === accountId))
+      .filter((account): account is CodexAccount => Boolean(account));
+    const now = Math.floor(Date.now() / 1000);
+    const queries = memberAccounts.flatMap((account) =>
+      buildCodexAccountWindowStatQueries(
+        account.id,
+        getCodexQuotaWindows(account.quota),
+        now,
+      ),
+    );
+    if (queries.length === 0) {
+      setSessionWindowStats({ ready: false, byAccountId: {} });
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const rows =
+          await codexLocalAccessService.queryCodexLocalAccessAccountWindowStats(
+            queries,
+          );
+        if (cancelled) return;
+        const byAccountId: Record<
+          string,
+          { primary?: CodexWindowStats; secondary?: CodexWindowStats }
+        > = {};
+        rows.forEach((row) => {
+          const stats: CodexWindowStats = {
+            requestCount: row.requestCount,
+            inputTokens: row.inputTokens,
+            cachedInputTokens: row.cachedTokens,
+            outputTokens: row.outputTokens,
+            totalTokens: row.totalTokens,
+            estimatedCostUsd: row.estimatedCostUsd,
+          };
+          const current = byAccountId[row.accountId] ?? {};
+          if (row.windowKey === "secondary") {
+            current.secondary = stats;
+          } else if (row.windowKey === "primary") {
+            current.primary = stats;
+          }
+          byAccountId[row.accountId] = current;
+        });
+        setSessionWindowStats({ ready: true, byAccountId });
+      } catch {
+        if (!cancelled) {
+          setSessionWindowStats({ ready: false, byAccountId: {} });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [accounts, activeTab, localAccessCollection?.accountIds]);
+
+  const applyWindowStatsToQuotaItems = useCallback(
+    (
+      account: CodexAccount,
+      items: ReturnType<typeof buildCodexAccountPresentation>["quotaItems"],
+    ) => {
+      if (!sessionWindowStats.ready) {
+        return items;
+      }
+      const accountStats = sessionWindowStats.byAccountId[account.id];
+      if (!accountStats) {
+        return items;
+      }
+      return items.map((item) => {
+        const stats =
+          item.key === "primary"
+            ? accountStats.primary
+            : item.key === "secondary"
+              ? accountStats.secondary
+              : null;
+        if (!stats) return item;
+        const windowStatsText = formatCodexWindowStatsText(stats);
+        const hint = t(
+          "codex.quota.windowStatsHint",
+          "从本窗口满额到现在，该账号走 API 服务的请求数、token 和账号计费",
+        );
+        return {
+          ...item,
+          windowStats: stats,
+          windowStatsText,
+          hintText: [item.hintText, windowStatsText, hint]
+            .filter(Boolean)
+            .join("\n"),
+        };
+      });
+    },
+    [sessionWindowStats, t],
+  );
 
   const compareAccountsBySort = useMemo(
     () =>
@@ -10535,36 +11183,6 @@ export function CodexAccountsPage() {
     [showAdditionalQuota, showCodeReviewQuota],
   );
 
-  const resolveCompactQuotaItems = useCallback(
-    (presentation: ReturnType<typeof buildCodexAccountPresentation>) => {
-      const standardQuotaItems = presentation.quotaItems.filter(
-        (item) => item.key !== "code_review",
-      );
-      const first = standardQuotaItems[0];
-      const primary =
-        standardQuotaItems.find((item) => item.key === "primary") ?? first;
-      const secondary =
-        standardQuotaItems.find((item) => item.key === "secondary") ??
-        standardQuotaItems.find((item) => item.key !== primary?.key);
-
-      return [
-        {
-          key: "primary",
-          valueText: primary?.valueText ?? "--",
-          quotaClass: primary?.quotaClass ?? "unknown",
-          titleText: primary?.hintText || primary?.label || "",
-        },
-        {
-          key: "secondary",
-          valueText: secondary?.valueText ?? "--",
-          quotaClass: secondary?.quotaClass ?? "unknown",
-          titleText: secondary?.hintText || secondary?.label || "",
-        },
-      ];
-    },
-    [],
-  );
-
   const renderResetCreditControls = (account: CodexAccount) => {
     if (isCodexApiKeyAccount(account) || isCodexAgentIdentityAccount(account)) return null;
 
@@ -10620,7 +11238,16 @@ export function CodexAccountsPage() {
         getCodexSwitchOrLaunchBlockedReason(account);
       const isChatCompletionsApiKey =
         isCodexChatCompletionsApiKeyAccount(account);
-      const compactQuotaItems = resolveCompactQuotaItems(presentation);
+      const compactOfficialQuotaItems = applyWindowStatsToQuotaItems(
+        account,
+        presentation.quotaItems,
+      ).filter((item) => item.key === "primary" || item.key === "secondary");
+      const compactDeepSeekSummary = isDeepSeekAccount(account)
+        ? apiKeyUsageMap[account.id]?.summary
+        : undefined;
+      const compactTokenPlanSummary = isCodexTokenPlanAccount(account)
+        ? apiKeyUsageMap[account.id]?.summary
+        : undefined;
       const subscriptionInfo = resolveSubscriptionPresentation(account);
       const showCompactExpiry =
         !isApiKeyAccount && !isAgentIdentityAccount && subscriptionInfo.bucket !== "active";
@@ -10651,21 +11278,100 @@ export function CodexAccountsPage() {
             {maskAccountText(presentation.displayName)}
           </span>
           <div className="codex-compact-quotas">
-            {!isChatCompletionsApiKey &&
-              compactQuotaItems.map((item) => (
-                <span
-                  key={`${account.id}-${item.key}`}
-                  className={`codex-compact-quota codex-compact-quota-${item.key}`}
-                  title={item.titleText}
-                >
-                  <span className="codex-compact-dot" />
+            {isDeepSeekAccount(account) ? (
+              <>
+                {(
+                  [
+                    [
+                      "totalBalance",
+                      t(
+                        "codex.modelProviders.usage.fields.totalBalance",
+                        "总余额",
+                      ),
+                      formatApiKeyUsageMoney(
+                        compactDeepSeekSummary?.balance,
+                        compactDeepSeekSummary?.unit,
+                      ),
+                    ],
+                    [
+                      "grantedBalance",
+                      t(
+                        "codex.modelProviders.usage.fields.grantedBalance",
+                        "赠金余额",
+                      ),
+                      formatApiKeyUsageDetailByKey(
+                        compactDeepSeekSummary,
+                        "grantedBalance",
+                      ),
+                    ],
+                    [
+                      "toppedUpBalance",
+                      t(
+                        "codex.modelProviders.usage.fields.toppedUpBalance",
+                        "充值余额",
+                      ),
+                      formatApiKeyUsageDetailByKey(
+                        compactDeepSeekSummary,
+                        "toppedUpBalance",
+                      ),
+                    ],
+                  ] as const
+                ).map(([key, label, value]) => (
                   <span
-                    className={`codex-compact-quota-value ${item.quotaClass}`}
+                    key={`${account.id}-${key}`}
+                    className={`codex-compact-quota codex-compact-quota-${key}`}
+                    title={`${label} ${value}`}
                   >
-                    {item.valueText}
+                    <span className="codex-compact-dot" />
+                    <span className="codex-compact-quota-value high">
+                      {value}
+                    </span>
                   </span>
-                </span>
-              ))}
+                ))}
+              </>
+            ) : isCodexTokenPlanAccount(account) ? (
+              <>
+                {(
+                  [
+                    [
+                      "remaining",
+                      t(
+                        "codex.modelProviders.usage.fields.remaining",
+                        "Remaining",
+                      ),
+                      formatApiKeyUsageMoney(
+                        compactTokenPlanSummary?.quotaRemaining ??
+                          compactTokenPlanSummary?.remaining,
+                        compactTokenPlanSummary?.unit,
+                      ),
+                    ],
+                    [
+                      "planName",
+                      t(
+                        "codex.modelProviders.usage.fields.planName",
+                        "Plan",
+                      ),
+                      compactTokenPlanSummary?.planName || "-",
+                    ],
+                  ] as const
+                ).map(([key, label, value]) => (
+                  <span
+                    key={`${account.id}-${key}`}
+                    className={`codex-compact-quota codex-compact-quota-${key}`}
+                    title={`${label} ${value}`}
+                  >
+                    <span className="codex-compact-dot" />
+                    <span className="codex-compact-quota-value high">
+                      {value}
+                    </span>
+                  </span>
+                ))}
+              </>
+            ) : (
+              !isChatCompletionsApiKey && (
+                <CodexQuotaMiniRows items={compactOfficialQuotaItems} t={t} />
+              )
+            )}
             {showCompactExpiry && (
               <span className="codex-compact-expiry-wrap">
                 <span
@@ -10736,17 +11442,18 @@ export function CodexAccountsPage() {
         getCodexSwitchOrLaunchBlockedReason(account);
       const isPendingOAuthAccount = isPendingOAuthCodexAccount(account);
       const isNewApiAccount = isCodexNewApiAccount(account);
-      const isChatCompletionsApiKey =
-        isCodexChatCompletionsApiKeyAccount(account);
       const isEditingApiKeyName =
         isApiKeyAccount && editingApiKeyNameId === account.id;
       const isSavingApiKeyName = savingApiKeyNameId === account.id;
       const planClass = presentation.planClass || "unknown";
       const isSelected = selected.has(account.id);
-      const quotaItems = resolveVisibleQuotaItems(
-        presentation,
-        isApiKeyAccount,
-        isNewApiAccount,
+      const quotaItems = applyWindowStatsToQuotaItems(
+        account,
+        resolveVisibleQuotaItems(
+          presentation,
+          isApiKeyAccount,
+          isNewApiAccount,
+        ),
       );
       const reauthErrorMeta = resolveQuotaErrorMeta(
         account.requires_reauth && account.reauth_reason
@@ -10796,23 +11503,25 @@ export function CodexAccountsPage() {
       const apiKeyUsageMode = resolveApiKeyUsageMode(
         apiKeyUsageMap[account.id]?.summary,
       );
-      const showApiKeyUsagePanel =
-        isApiKeyAccount &&
-        !isNewApiAccount &&
-        !isChatCompletionsApiKey &&
-        !hideRelayQuota;
+      const showApiKeyUsagePanel = shouldShowCodexApiKeyUsagePanel(
+        account,
+        hideRelayQuota,
+      );
       const isSub2ApiUsageAccount =
         showApiKeyUsagePanel &&
         (apiKeyUsageMode === "sub2api" ||
           apiKeyUsageProvider?.integrationType === "sub2api");
+      const isTokenPlanUsageAccount =
+        showApiKeyUsagePanel && apiKeyUsageMode === "token_plan";
       const isQuotaAwareApiKeyAccount =
         showApiKeyUsagePanel &&
         !isSponsorApiKeyAccount &&
         (apiKeyUsageMode !== null ||
+          isDeepSeekAccount(account) ||
           apiKeyUsageProvider?.integrationType === "new_api" ||
           apiKeyUsageProvider?.integrationType === "sub2api");
       const shouldRenderQuotaSection =
-        (!hideRelayQuota && showApiKeyUsagePanel) ||
+        showApiKeyUsagePanel ||
         !isApiKeyAccount ||
         (isNewApiAccount && !hideRelayQuota);
       const displayPlanClass = isSponsorApiKeyAccount
@@ -10926,16 +11635,37 @@ export function CodexAccountsPage() {
                 </span>
               )}
               {isInLocalAccess && (
-                <span className="group-account-badge is-current">
-                  {t("codex.localAccess.modal.selected", "已加入 API 服务")}
-                </span>
+                <button
+                  type="button"
+                  className="group-account-badge codex-local-access-inline-remove"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleRemoveLocalAccessAccount(account.id);
+                  }}
+                  disabled={addingLocalAccessAccountId !== null}
+                  title={t(
+                    "codex.localAccess.removeAction",
+                    "移除 API 服务",
+                  )}
+                  aria-label={t(
+                    "codex.localAccess.removeAction",
+                    "移除 API 服务",
+                  )}
+                >
+                  {addingLocalAccessAccountId === account.id ? (
+                    <RefreshCw size={11} className="loading-spinner" />
+                  ) : (
+                    <Link2 size={11} />
+                  )}
+                  {t("codex.localAccess.removeAction", "移除 API 服务")}
+                </button>
               )}
               {!isInLocalAccess && canAddToLocalAccess && (
                 <button
                   type="button"
                   className="group-account-badge codex-local-access-inline-add"
                   onClick={() => void handleAddLocalAccessAccount(account.id)}
-                  disabled={addingLocalAccessAccountId === account.id}
+                  disabled={addingLocalAccessAccountId !== null}
                   title={t(
                     "codex.localAccess.entryAction",
                     "添加至 API 服务",
@@ -10943,6 +11673,17 @@ export function CodexAccountsPage() {
                 >
                   <Link2 size={11} />
                   {t("codex.localAccess.entryAction", "添加至 API 服务")}
+                </button>
+              )}
+              {isStandardCodexOAuthAccount(account) && (
+                <button
+                  type="button"
+                  className="codex-account-note-chip"
+                  onClick={() => openFingerprintSettingsModal(account)}
+                  title={t("common.codexFingerprint.modeLabel", "设备指纹模式")}
+                >
+                  <ShieldCheck size={12} />
+                  <span>{t("common.codexFingerprint.short", "指纹")}</span>
                 </button>
               )}
               {!isApiKeyAccount && renderAccountNoteButton(account)}
@@ -10988,7 +11729,7 @@ export function CodexAccountsPage() {
                 >
                   {apiBaseUrlLine}
                 </span>
-                {isSub2ApiUsageAccount && (
+                {(isSub2ApiUsageAccount || isTokenPlanUsageAccount) && (
                   <button
                     type="button"
                     className="codex-provider-inline-switch"
@@ -11042,40 +11783,7 @@ export function CodexAccountsPage() {
                     <strong>{cockpitApiAccountBalanceText}</strong>
                   </div>
                 )}
-                {quotaItems.map((item) => {
-                  const QuotaIcon =
-                    item.key === "secondary" || item.key.endsWith(":secondary")
-                      ? Calendar
-                      : item.key === "code_review"
-                        ? BookOpen
-                        : item.key === "new_api_quota"
-                          ? Database
-                          : Clock;
-                  return (
-                    <div
-                      key={item.key}
-                      className="quota-item"
-                      title={item.hintText}
-                    >
-                      <div className="quota-header">
-                        <QuotaIcon size={14} />
-                        <span className="quota-label">{item.label}</span>
-                        <span className={`quota-pct ${item.quotaClass}`}>
-                          {item.valueText}
-                        </span>
-                      </div>
-                      <div className="quota-bar-track">
-                        <div
-                          className={`quota-bar ${item.quotaClass}`}
-                          style={{ width: `${item.percentage}%` }}
-                        />
-                      </div>
-                      {item.resetText && (
-                        <span className="quota-reset">{item.resetText}</span>
-                      )}
-                    </div>
-                  );
-                })}
+                <CodexQuotaMiniRows items={quotaItems} t={t} />
                 {quotaItems.length === 0 && !cockpitApiAccountBalanceText && (
                   <div className="quota-empty">
                     {t("common.shared.quota.noData", "暂无配额数据")}
@@ -12150,10 +12858,13 @@ export function CodexAccountsPage() {
         isApiKeyAccount && editingApiKeyNameId === account.id;
       const isSavingApiKeyName = savingApiKeyNameId === account.id;
       const planClass = presentation.planClass || "unknown";
-      const quotaItems = resolveVisibleQuotaItems(
-        presentation,
-        isApiKeyAccount,
-        isNewApiAccount,
+      const quotaItems = applyWindowStatsToQuotaItems(
+        account,
+        resolveVisibleQuotaItems(
+          presentation,
+          isApiKeyAccount,
+          isNewApiAccount,
+        ),
       );
       const reauthErrorMeta = resolveQuotaErrorMeta(
         account.requires_reauth && account.reauth_reason
@@ -12203,19 +12914,21 @@ export function CodexAccountsPage() {
       const apiKeyUsageMode = resolveApiKeyUsageMode(
         apiKeyUsageMap[account.id]?.summary,
       );
-      const showApiKeyUsagePanel =
-        isApiKeyAccount &&
-        !isNewApiAccount &&
-        !isChatCompletionsApiKey &&
-        !hideRelayQuota;
+      const showApiKeyUsagePanel = shouldShowCodexApiKeyUsagePanel(
+        account,
+        hideRelayQuota,
+      );
       const isSub2ApiUsageAccount =
         showApiKeyUsagePanel &&
         (apiKeyUsageMode === "sub2api" ||
           apiKeyUsageProvider?.integrationType === "sub2api");
+      const isTokenPlanUsageAccount =
+        showApiKeyUsagePanel && apiKeyUsageMode === "token_plan";
       const isQuotaAwareApiKeyAccount =
         showApiKeyUsagePanel &&
         !isSponsorApiKeyAccount &&
         (apiKeyUsageMode !== null ||
+          isDeepSeekAccount(account) ||
           apiKeyUsageProvider?.integrationType === "new_api" ||
           apiKeyUsageProvider?.integrationType === "sub2api");
       const displayPlanClass = isSponsorApiKeyAccount
@@ -12307,9 +13020,41 @@ export function CodexAccountsPage() {
                     </span>
                   )}
                   {isInLocalAccess && (
-                    <span className="group-account-badge is-current">
-                      {t("codex.localAccess.modal.selected", "已加入 API 服务")}
-                    </span>
+                    <button
+                      type="button"
+                      className="group-account-badge codex-local-access-inline-remove"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleRemoveLocalAccessAccount(account.id);
+                      }}
+                      disabled={addingLocalAccessAccountId !== null}
+                      title={t(
+                        "codex.localAccess.removeAction",
+                        "移除 API 服务",
+                      )}
+                      aria-label={t(
+                        "codex.localAccess.removeAction",
+                        "移除 API 服务",
+                      )}
+                    >
+                      {addingLocalAccessAccountId === account.id ? (
+                        <RefreshCw size={11} className="loading-spinner" />
+                      ) : (
+                        <Link2 size={11} />
+                      )}
+                      {t("codex.localAccess.removeAction", "移除 API 服务")}
+                    </button>
+                  )}
+                  {isStandardCodexOAuthAccount(account) && (
+                    <button
+                      type="button"
+                      className="codex-account-note-chip"
+                      onClick={() => openFingerprintSettingsModal(account)}
+                      title={t("common.codexFingerprint.modeLabel", "设备指纹模式")}
+                    >
+                      <ShieldCheck size={12} />
+                      <span>{t("common.codexFingerprint.short", "指纹")}</span>
+                    </button>
                   )}
                   {!isApiKeyAccount && renderAccountNoteButton(account)}
                   {resetCreditControls}
@@ -12354,7 +13099,7 @@ export function CodexAccountsPage() {
                     >
                       {apiBaseUrlLine}
                     </span>
-                    {isSub2ApiUsageAccount && (
+                    {(isSub2ApiUsageAccount || isTokenPlanUsageAccount) && (
                       <button
                         type="button"
                         className="codex-provider-inline-switch"
@@ -12457,31 +13202,7 @@ export function CodexAccountsPage() {
                       <strong>{cockpitApiAccountBalanceText}</strong>
                     </div>
                   )}
-                  {quotaItems.map((item) => (
-                    <div
-                      key={item.key}
-                      className="quota-item"
-                      title={item.hintText}
-                    >
-                      <div className="quota-header">
-                        <span className="quota-name">{item.label}</span>
-                        <span className={`quota-value ${item.quotaClass}`}>
-                          {item.valueText}
-                        </span>
-                      </div>
-                      <div className="quota-progress-track">
-                        <div
-                          className={`quota-progress-bar ${item.quotaClass}`}
-                          style={{ width: `${item.percentage}%` }}
-                        />
-                      </div>
-                      {item.resetText && (
-                        <div className="quota-footer">
-                          <span className="quota-reset">{item.resetText}</span>
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                  <CodexQuotaMiniRows items={quotaItems} t={t} />
                   {quotaItems.length === 0 && !cockpitApiAccountBalanceText && (
                     <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
                       {t("common.shared.quota.noData", "暂无配额数据")}
@@ -12857,6 +13578,10 @@ export function CodexAccountsPage() {
         ? new Set(["mode", "totalGranted", "totalAvailable", "expiresAt"])
         : usageMode === "sub2api"
           ? new Set(["mode", "remaining", "todayRequests", "todayTokens"])
+        : usageMode === "deepseek"
+            ? new Set(["mode", "totalBalance", "grantedBalance", "toppedUpBalance"])
+            : usageMode === "token_plan"
+              ? new Set(["mode", "remaining", "planName", "expiresAt"])
           : new Set<string>();
     const details = (summary?.details ?? []).filter(
       (item) => !coreDetailKeys.has(item.key),
@@ -12907,7 +13632,44 @@ export function CodexAccountsPage() {
                   : "-",
             },
           ]
-        : usageMode === "sub2api"
+        : usageMode === "token_plan"
+          ? [
+              {
+                key: "remaining",
+                label: t(
+                  "codex.modelProviders.usage.fields.remaining",
+                  "Remaining",
+                ),
+                value: formatApiKeyUsageQuotaValue(
+                  summary,
+                  summary?.quotaRemaining ?? summary?.remaining,
+                ),
+              },
+              {
+                key: "planName",
+                label: t(
+                  "codex.modelProviders.usage.fields.planName",
+                  "Plan",
+                ),
+                value: summary?.planName || "-",
+              },
+              {
+                key: "expiresAt",
+                label: t(
+                  "codex.modelProviders.usage.fields.expiresAt",
+                  "Next Reset",
+                ),
+                value: formatApiKeyUsageDetailByKey(
+                  summary,
+                  findApiKeyUsageDetail(summary, "intervalExpiresAt")
+                    ? "intervalExpiresAt"
+                    : findApiKeyUsageDetail(summary, "weeklyExpiresAt")
+                      ? "weeklyExpiresAt"
+                      : "expiresAt",
+                ),
+              },
+            ]
+          : usageMode === "sub2api"
           ? [
               {
                 key: "accountBalance",
@@ -12943,9 +13705,41 @@ export function CodexAccountsPage() {
                   : "-",
               },
             ]
+          : usageMode === "deepseek"
+            ? [
+                {
+                  key: "totalBalance",
+                  label: t(
+                    "codex.modelProviders.usage.fields.totalBalance",
+                    "总余额",
+                  ),
+                  value: formatApiKeyUsageMoney(summary?.balance, summary?.unit),
+                },
+                {
+                  key: "grantedBalance",
+                  label: t(
+                    "codex.modelProviders.usage.fields.grantedBalance",
+                    "赠金余额",
+                  ),
+                  value: formatApiKeyUsageDetailByKey(summary, "grantedBalance"),
+                },
+                {
+                  key: "toppedUpBalance",
+                  label: t(
+                    "codex.modelProviders.usage.fields.toppedUpBalance",
+                    "充值余额",
+                  ),
+                  value: formatApiKeyUsageDetailByKey(
+                    summary,
+                    "toppedUpBalance",
+                  ),
+                },
+              ]
           : [];
     const summaryGridClassName =
-      usageMode === "sub2api" || usageMode === "new_api"
+      usageMode === "sub2api" ||
+      usageMode === "new_api" ||
+      usageMode === "token_plan"
         ? "cockpit-api-summary-grid compact"
         : "cockpit-api-summary-grid";
 
@@ -14553,6 +15347,18 @@ export function CodexAccountsPage() {
                       {selected.size > 0 && (
                         <>
                           <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={openBatchFingerprintSettingsModal}
+                            disabled={!Array.from(selected).some((accountId) =>
+                              isStandardCodexOAuthAccount(store.accounts.find((item) => item.id === accountId)),
+                            )}
+                            title={t("common.codexFingerprint.batchAction", "批量设置设备指纹模式")}
+                          >
+                            <ShieldCheck size={14} />
+                            {t("common.codexFingerprint.batchAction", "设置指纹")}
+                          </button>
+                          <button
                             className="btn btn-secondary icon-only"
                             onClick={() => setShowAddToCodexGroupModal(true)}
                             title={
@@ -15016,6 +15822,27 @@ export function CodexAccountsPage() {
                   {addTab !== "oauth" && <MfaQuickCodeSelect />}
                   {addTab === "oauth" && (
                     <div className="add-section">
+                      <details className="codex-oauth-advanced-settings">
+                        <summary>{t("common.advancedSettings", "高级设置")}</summary>
+                        <label className="codex-account-note-field">
+                          <span>{t("common.codexFingerprint.modeLabel", "设备指纹模式")}</span>
+                          <SingleSelectDropdown
+                            value={oauthFingerprintMode}
+                            onChange={(value) => setOauthFingerprintMode(value as CodexFingerprintMode)}
+                            options={[
+                              { value: "session", label: t("common.codexFingerprint.session", "会话（推荐）") },
+                              { value: "device", label: t("common.codexFingerprint.device", "设备") },
+                              { value: "full", label: t("common.codexFingerprint.full", "完整") },
+                              { value: "off", label: t("common.codexFingerprint.off", "关闭") },
+                            ]}
+                            disabled={importing}
+                            ariaLabel={t("common.codexFingerprint.modeLabel", "设备指纹模式")}
+                          />
+                          <small className="codex-account-note-field-hint">
+                            {t("common.codexFingerprint.modeHint", "仅 OAuth 账号生效；未设置时默认使用会话模式。")}
+                          </small>
+                        </label>
+                      </details>
                       {reauthTargetEmail && (
                         <div className="oauth-link codex-reauth-email-block">
                           <label>
@@ -15340,24 +16167,48 @@ export function CodexAccountsPage() {
                                 "已保存 API Key",
                               )}
                             </label>
-                            <div className="api-provider-endpoint-list">
-                              {selectedManagedProvider.apiKeys.map((item) => (
-                                <button
-                                  key={item.id}
-                                  className={`api-provider-endpoint-chip ${managedProviderApiKeyId === item.id ? "active" : ""}`}
-                                  onClick={() =>
-                                    handleSelectManagedProviderApiKey(item.id)
-                                  }
-                                  type="button"
-                                >
-                                  {item.name ||
-                                    t(
-                                      "codex.modelProviders.unnamedKey",
-                                      "未命名 Key",
-                                    )}
-                                </button>
-                              ))}
-                            </div>
+                            <SingleSelectDropdown
+                              className="codex-managed-api-key-select"
+                              value={managedProviderApiKeyId}
+                              options={[
+                                {
+                                  value: "",
+                                  label: t(
+                                    "codex.modelProviders.manualApiKeyOption",
+                                    "手动输入新 Key",
+                                  ),
+                                },
+                                ...selectedManagedProvider.apiKeys.map(
+                                  (item) => ({
+                                    value: item.id,
+                                    label: formatCodexManagedApiKeyOptionLabel(
+                                      item,
+                                      t(
+                                        "codex.modelProviders.unnamedKey",
+                                        "未命名 Key",
+                                      ),
+                                    ),
+                                  }),
+                                ),
+                              ]}
+                              onChange={handleSelectManagedProviderApiKey}
+                              placeholder={t(
+                                "codex.modelProviders.selectSavedApiKeyPlaceholder",
+                                "选择 API Key",
+                              )}
+                              ariaLabel={t(
+                                "codex.modelProviders.selectSavedApiKey",
+                                "已保存 API Key",
+                              )}
+                            />
+                            {selectedManagedProvider.apiKeys.length > 1 && (
+                              <p className="api-provider-hint">
+                                {t(
+                                  "codex.modelProviders.selectSavedApiKeyHint",
+                                  "该供应商有多个 API Key，可在此切换选择。",
+                                )}
+                              </p>
+                            )}
                           </div>
                         )}
                       <div className="oauth-link">
@@ -15634,6 +16485,18 @@ export function CodexAccountsPage() {
                               )}
                               disabled={addStatus === "loading"}
                               aria-describedby="codex-api-model-catalog-add-hint"
+                            />
+                            <CodexModelContextWindowTable
+                              models={apiModelCatalogDraft}
+                              drafts={apiModelContextWindowsInput}
+                              onChange={(model, value) => {
+                                setApiModelContextWindowsInput((current) => ({
+                                  ...current,
+                                  [model]: value,
+                                }));
+                                setApiModelCatalogError(null);
+                              }}
+                              disabled={addStatus === "loading"}
                             />
                             <div className="api-model-catalog-toolbar">
                               <p
@@ -16034,25 +16897,40 @@ export function CodexAccountsPage() {
                               "已保存 API Key",
                             )}
                           </label>
-                          <div className="api-provider-endpoint-list">
-                            {selectedQuickSwitchProvider.apiKeys.map((item) => (
-                              <button
-                                key={item.id}
-                                className={`api-provider-endpoint-chip ${quickSwitchApiKeyId === item.id ? "active" : ""}`}
-                                onClick={() =>
-                                  handleSelectQuickSwitchApiKey(item.id)
-                                }
-                                type="button"
-                                disabled={quickSwitchSubmitting}
-                              >
-                                {item.name ||
+                          <SingleSelectDropdown
+                            className="codex-managed-api-key-select"
+                            value={quickSwitchApiKeyId}
+                            options={selectedQuickSwitchProvider.apiKeys.map(
+                              (item) => ({
+                                value: item.id,
+                                label: formatCodexManagedApiKeyOptionLabel(
+                                  item,
                                   t(
                                     "codex.modelProviders.unnamedKey",
                                     "未命名 Key",
-                                  )}
-                              </button>
-                            ))}
-                          </div>
+                                  ),
+                                ),
+                              }),
+                            )}
+                            onChange={handleSelectQuickSwitchApiKey}
+                            disabled={quickSwitchSubmitting}
+                            placeholder={t(
+                              "codex.modelProviders.selectSavedApiKeyPlaceholder",
+                              "选择 API Key",
+                            )}
+                            ariaLabel={t(
+                              "codex.modelProviders.selectSavedApiKey",
+                              "已保存 API Key",
+                            )}
+                          />
+                          {selectedQuickSwitchProvider.apiKeys.length > 1 && (
+                            <p className="api-provider-hint">
+                              {t(
+                                "codex.modelProviders.selectSavedApiKeyHint",
+                                "该供应商有多个 API Key，可在此切换选择。",
+                              )}
+                            </p>
+                          )}
                         </div>
                       )}
 
@@ -16733,29 +17611,50 @@ export function CodexAccountsPage() {
                               "已保存 API Key",
                             )}
                           </label>
-                          <div className="api-provider-endpoint-list">
-                            {selectedEditingManagedProvider.apiKeys.map(
-                              (item) => (
-                                <button
-                                  key={item.id}
-                                  className={`api-provider-endpoint-chip ${editingManagedProviderApiKeyId === item.id ? "active" : ""}`}
-                                  onClick={() =>
-                                    handleSelectEditingManagedProviderApiKey(
-                                      item.id,
-                                    )
-                                  }
-                                  type="button"
-                                  disabled={savingApiKeyCredentials}
-                                >
-                                  {item.name ||
+                          <SingleSelectDropdown
+                            className="codex-managed-api-key-select"
+                            value={editingManagedProviderApiKeyId}
+                            options={[
+                              {
+                                value: "",
+                                label: t(
+                                  "codex.modelProviders.manualApiKeyOption",
+                                  "手动输入新 Key",
+                                ),
+                              },
+                              ...selectedEditingManagedProvider.apiKeys.map(
+                                (item) => ({
+                                  value: item.id,
+                                  label: formatCodexManagedApiKeyOptionLabel(
+                                    item,
                                     t(
                                       "codex.modelProviders.unnamedKey",
                                       "未命名 Key",
-                                    )}
-                                </button>
+                                    ),
+                                  ),
+                                }),
                               ),
+                            ]}
+                            onChange={handleSelectEditingManagedProviderApiKey}
+                            disabled={savingApiKeyCredentials}
+                            placeholder={t(
+                              "codex.modelProviders.selectSavedApiKeyPlaceholder",
+                              "选择 API Key",
                             )}
-                          </div>
+                            ariaLabel={t(
+                              "codex.modelProviders.selectSavedApiKey",
+                              "已保存 API Key",
+                            )}
+                          />
+                          {selectedEditingManagedProvider.apiKeys.length >
+                            1 && (
+                            <p className="api-provider-hint">
+                              {t(
+                                "codex.modelProviders.selectSavedApiKeyHint",
+                                "该供应商有多个 API Key，可在此切换选择。",
+                              )}
+                            </p>
+                          )}
                         </div>
                       )}
                     <div className="oauth-link">
@@ -17000,6 +17899,20 @@ export function CodexAccountsPage() {
                             )}
                             disabled={savingApiKeyCredentials}
                             aria-describedby="codex-api-model-catalog-edit-hint"
+                          />
+                          <CodexModelContextWindowTable
+                            models={editingApiModelCatalogDraft}
+                            drafts={editingApiModelContextWindowsInput}
+                            onChange={(model, value) => {
+                              setEditingApiModelContextWindowsInput(
+                                (current) => ({
+                                  ...current,
+                                  [model]: value,
+                                }),
+                              );
+                              setEditingApiModelCatalogError(null);
+                            }}
+                            disabled={savingApiKeyCredentials}
                           />
                           <div className="api-model-catalog-toolbar">
                             <p
@@ -18674,6 +19587,68 @@ export function CodexAccountsPage() {
             document.body,
           )}
 
+          {fingerprintSettingsAccountIds.length > 0 && createPortal(
+            <div className="modal-overlay">
+              <div className="modal codex-account-note-modal">
+                <div className="modal-header">
+                  <h2>{t("common.codexFingerprint.settingsTitle", "Codex 指纹设置")}</h2>
+                  <button
+                    className="modal-close"
+                    onClick={closeFingerprintSettingsModal}
+                    aria-label={t("common.close", "关闭")}
+                    disabled={fingerprintSettingsSaving}
+                  >
+                    <X />
+                  </button>
+                </div>
+                <div className="modal-body">
+                  <ModalErrorMessage
+                    message={fingerprintSettingsError}
+                    scrollKey={fingerprintSettingsErrorScrollKey}
+                  />
+                  <p className="codex-account-note-desc">
+                    {fingerprintSettingsAccount
+                      ? t("common.codexFingerprint.accountHint", {
+                          account: maskAccountText(buildCodexAccountPresentation(fingerprintSettingsAccount, t).displayName),
+                          defaultValue: "为 {{account}} 设置 OAuth 设备与会话标识的收敛方式。",
+                        })
+                      : t("common.codexFingerprint.batchHint", {
+                          count: fingerprintSettingsAccountIds.length,
+                          defaultValue: "为选中的 {{count}} 个 OAuth 账号设置设备与会话标识的收敛方式。",
+                        })}
+                  </p>
+                  <label className="codex-account-note-field">
+                    <span>{t("common.codexFingerprint.modeLabel", "设备指纹模式")}</span>
+                    <SingleSelectDropdown
+                      value={fingerprintSettingsMode}
+                      onChange={(value) => setFingerprintSettingsMode(value as CodexFingerprintMode)}
+                      options={[
+                        { value: "session", label: t("common.codexFingerprint.session", "会话（推荐）") },
+                        { value: "device", label: t("common.codexFingerprint.device", "设备") },
+                        { value: "full", label: t("common.codexFingerprint.full", "完整") },
+                        { value: "off", label: t("common.codexFingerprint.off", "关闭") },
+                      ]}
+                      disabled={fingerprintSettingsSaving}
+                      ariaLabel={t("common.codexFingerprint.modeLabel", "设备指纹模式")}
+                    />
+                    <small className="codex-account-note-field-hint">
+                      {t("common.codexFingerprint.modeHint", "仅 OAuth 账号生效；未设置时默认使用会话模式。")}
+                    </small>
+                  </label>
+                </div>
+                <div className="modal-footer">
+                  <button className="btn btn-secondary" onClick={closeFingerprintSettingsModal} disabled={fingerprintSettingsSaving}>
+                    {t("common.cancel", "取消")}
+                  </button>
+                  <button className="btn btn-primary" onClick={() => void saveFingerprintSettings()} disabled={fingerprintSettingsSaving}>
+                    {fingerprintSettingsSaving ? t("common.saving", "保存中...") : t("common.save", "保存")}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )}
+
           <CodexGroupAccountPickerModal
             isOpen={!!groupQuickAddGroupId}
             targetGroup={groupQuickAddGroup}
@@ -18847,6 +19822,7 @@ export function CodexAccountsPage() {
           showCancelButton
         />
       )}
+      {deepSeekStart.modal}
 
       {activeTab === "instances" && (
         <CodexInstancesContent

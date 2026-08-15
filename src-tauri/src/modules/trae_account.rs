@@ -3466,11 +3466,7 @@ pub(crate) fn backfill_account_user_id_if_missing(
     save_account_file(&account)?;
     // Keep index summary in sync for UI/debug.
     if let Ok(mut index) = load_account_index_checked() {
-        if let Some(item) = index
-            .accounts
-            .iter_mut()
-            .find(|item| item.id == account.id)
-        {
+        if let Some(item) = index.accounts.iter_mut().find(|item| item.id == account.id) {
             item.user_id = Some(uid.clone());
             item.last_used = account.last_used;
             let _ = save_account_index(&index);
@@ -3651,9 +3647,7 @@ fn refuse_inject_if_storage_live(storage_path: &Path, account_id: &str) -> Resul
         }
     }
 
-    if let Ok(contexts) =
-        crate::modules::trae_instance::resolve_running_bound_account_contexts()
-    {
+    if let Ok(contexts) = crate::modules::trae_instance::resolve_running_bound_account_contexts() {
         for context in contexts {
             if storage_paths_equivalent(context.storage_path.as_path(), storage_path) {
                 return Err(format!(
@@ -3677,11 +3671,7 @@ pub fn inject_to_trae_at_path(storage_path: &Path, account_id: &str) -> Result<(
     // If the target storage already holds this account's fresher rotated tokens,
     // adopt them before rewrite so we never downgrade a live Trae session snapshot.
     if storage_path.exists()
-        && sync_account_tokens_from_storage_path(
-            &mut account,
-            storage_path,
-            "注入前本地",
-        )
+        && sync_account_tokens_from_storage_path(&mut account, storage_path, "注入前本地")
     {
         if let Err(err) = save_account_file(&account) {
             logger::log_warn(&format!(
@@ -4875,9 +4865,7 @@ fn sync_account_tokens_from_storage_path(
 }
 
 /// Collect candidate storage.json paths that may hold a fresher session for this account.
-fn collect_storage_paths_for_account_sync(
-    account: &TraeAccount,
-) -> Vec<(String, PathBuf)> {
+fn collect_storage_paths_for_account_sync(account: &TraeAccount) -> Vec<(String, PathBuf)> {
     let platform = resolve_account_platform_kind(account);
     let mut paths: Vec<(String, PathBuf)> = Vec::new();
     let mut push_unique = |label: String, path: PathBuf| {
@@ -4898,9 +4886,7 @@ fn collect_storage_paths_for_account_sync(
     }
 
     // Bound multi-open instances may hold a newer rotated refresh token.
-    if let Ok(store) =
-        crate::modules::trae_instance::load_instance_store_for_platform(platform)
-    {
+    if let Ok(store) = crate::modules::trae_instance::load_instance_store_for_platform(platform) {
         if store
             .default_settings
             .bind_account_id
@@ -4920,12 +4906,7 @@ fn collect_storage_paths_for_account_sync(
             }
         }
         for instance in store.instances {
-            if instance
-                .bind_account_id
-                .as_deref()
-                .map(str::trim)
-                != Some(account.id.as_str())
-            {
+            if instance.bind_account_id.as_deref().map(str::trim) != Some(account.id.as_str()) {
                 continue;
             }
             let label = if instance.name.trim().is_empty() {
@@ -5367,6 +5348,232 @@ pub async fn refresh_tokens_for_platform(
         .filter(|account| resolve_account_platform_kind(account) == platform)
         .collect();
     refresh_accounts(accounts).await
+}
+
+// ============ 签到功能 API ============
+
+/// 签到状态响应（前端展示用）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CheckinStatusResult {
+    pub checked_in: bool,
+    pub consecutive_days: i32,
+    pub total_credits: i64,
+    pub credits_earned_today: i64,
+    pub checkin_date: String,
+    pub message: String,
+}
+
+/// Trae API 签到状态响应
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct TraeCheckinStatusResponse {
+    #[serde(default)]
+    pub checked_in: bool,
+    #[serde(default)]
+    pub credits: i64,
+    #[serde(default)]
+    pub code: i32,
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// Trae API 签到领取响应
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct TraeCheckinClaimResponse {
+    #[serde(default)]
+    pub code: i32,
+    #[serde(default)]
+    pub message: String,
+}
+
+/// 获取 Trae 账号的今日签到状态
+pub async fn get_trae_checkin_status(
+    account_id: &str,
+    device_id: &str,
+) -> Result<CheckinStatusResult, String> {
+    let account = load_account(account_id).ok_or_else(|| "账号不存在".to_string())?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        "application/json"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        reqwest::header::ACCEPT,
+        "application/json, text/plain, */*"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        reqwest::header::ORIGIN,
+        "https://www.trae.cn"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        reqwest::header::REFERER,
+        "https://www.trae.cn/"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        "x-app-type",
+        "trae"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {}", account.access_token)
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+
+    let mut url = "https://api.trae.cn/trae/api/v2/ug/checkin_credits/status".to_string();
+    if !device_id.is_empty() {
+        url.push_str(&format!("?did={}", device_id));
+        if let Ok(device_header) = reqwest::header::HeaderValue::from_bytes(device_id.as_bytes()) {
+            headers.insert("x-device-id", device_header);
+        }
+    }
+
+    let response = client
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| format!("签到状态请求失败: {}", e))?;
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(format!("获取签到状态失败 ({}): {}", status, body));
+    }
+
+    let data: TraeCheckinStatusResponse =
+        serde_json::from_str(&body).map_err(|e| format!("解析签到状态响应失败: {}", e))?;
+
+    if data.code != 0 {
+        return Err(format!(
+            "获取签到状态失败 (code={}): Token 已过期，请重新登录",
+            data.code
+        ));
+    }
+
+    let message = if data.checked_in {
+        format!("今日已签到 · 共 {} 积分", data.credits)
+    } else {
+        "今日未签到".to_string()
+    };
+
+    Ok(CheckinStatusResult {
+        checked_in: data.checked_in,
+        consecutive_days: 0,
+        total_credits: data.credits,
+        credits_earned_today: 0,
+        checkin_date: String::new(),
+        message,
+    })
+}
+
+/// 领取 Trae 账号的今日签到积分
+pub async fn claim_trae_checkin(
+    account_id: &str,
+    device_id: &str,
+) -> Result<CheckinStatusResult, String> {
+    let account = load_account(account_id).ok_or_else(|| "账号不存在".to_string())?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        "application/json"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        reqwest::header::ACCEPT,
+        "application/json, text/plain, */*"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        reqwest::header::ORIGIN,
+        "https://www.trae.cn"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        reqwest::header::REFERER,
+        "https://www.trae.cn/"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        "x-app-type",
+        "trae"
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {}", account.access_token)
+            .parse::<reqwest::header::HeaderValue>()
+            .map_err(|e| e.to_string())?,
+    );
+
+    let url = "https://api.trae.cn/trae/api/v2/ug/checkin_credits/claim".to_string();
+    if !device_id.is_empty() {
+        let device_header = reqwest::header::HeaderValue::from_bytes(device_id.as_bytes())
+            .map_err(|e| format!("Device ID 格式错误: {}", e))?;
+        headers.insert("x-device-id", device_header);
+    }
+
+    let response = client
+        .post(&url)
+        .headers(headers)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("签到领取请求失败: {}", e))?;
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(format!("签到领取失败 ({}): {}", status, body));
+    }
+
+    let claim_data: TraeCheckinClaimResponse =
+        serde_json::from_str(&body).map_err(|e| format!("解析签到领取响应失败: {}", e))?;
+
+    if claim_data.code != 0 {
+        return Err(format!(
+            "签到领取失败 (code={}): Token 已过期，请重新登录",
+            claim_data.code
+        ));
+    }
+
+    // 领取后重新查询状态
+    let status_result = get_trae_checkin_status(account_id, device_id).await?;
+
+    Ok(CheckinStatusResult {
+        message: format!("签到成功！获得 {} 积分", status_result.total_credits),
+        ..status_result
+    })
 }
 
 #[cfg(test)]

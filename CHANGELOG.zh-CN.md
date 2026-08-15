@@ -7,6 +7,84 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
 ---
+## [1.3.20] - 2026-08-14
+
+### 新增
+
+- **Codex MiniMax Token Plan 和智谱 GLM Coding Plan 账号可显示额度**：可刷新并查看剩余百分比、套餐和重置时间。感谢 @Jonesxq（[#1929](https://github.com/jlcodes99/cockpit-tools/pull/1929)）。
+- **Codex 模型供应商新增 OpenCode Go，OpenRouter 补上 Luna Pro 模型**：可直接选择 OpenCode Go 及其当前模型目录。感谢 @Jonesxq（[#1922](https://github.com/jlcodes99/cockpit-tools/pull/1922)）。
+- **已有 Codex 模型供应商 API Key 可直接编辑**：不用删掉重建，关联账号会同步新 Key。感谢 @Jonesxq（[#1923](https://github.com/jlcodes99/cockpit-tools/pull/1923)）。
+
+### 变更
+
+- **考虑到 Codex Spark 等长标题，调整了账号额度布局**：标题放在进度条上方，进度条保持对齐。
+- **Codex 里的 DeepSeek 改为展示真实推理档位**：`low` / `high` / `max`，不再套用 Codex 默认的 `medium` / `xhigh`。感谢 @Jonesxq（[#1931](https://github.com/jlcodes99/cockpit-tools/pull/1931)）。
+
+### 修复
+
+- **已关闭的引导、账号分组和自定义排序在更新后会保留**：网关引导、风险提示和侧栏提示会记到本机数据目录，旧的 localStorage 键也仍视为已关闭；账号列表未就绪时不会再清空分组成员或自定义排序。分组文件读取失败不再当成空数据，写入改为原子替换。感谢 @Jonesxq（[#1933](https://github.com/jlcodes99/cockpit-tools/pull/1933)，[#1919](https://github.com/jlcodes99/cockpit-tools/issues/1919)）。
+- **CodeBuddy 国内版和 WorkBuddy 企业账号可显示真实用量**：个人资源接口为空时改走官方企业用量接口。感谢 @Yuyang-0423（[#1911](https://github.com/jlcodes99/cockpit-tools/pull/1911)）。
+- **供应商用量查询支持只填根地址**：先试你填的地址，再回退到 `/v1`。感谢 @Jonesxq（[#1926](https://github.com/jlcodes99/cockpit-tools/pull/1926)）。
+- **Codex 切到内置 OpenAI 时，不再覆盖用户自己选的非托管 `model_provider`**。感谢 @Jonesxq（[#1930](https://github.com/jlcodes99/cockpit-tools/pull/1930)）。
+- **WorkBuddy 定时签到更稳**：保存配置后会立刻唤醒调度，启动时检查一次，活动暂时关闭会重试而不是记成今天已签。感谢 @Jonesxq（[#1932](https://github.com/jlcodes99/cockpit-tools/pull/1932)）。
+- **Codex API 服务请求日志会记录推理力度**。感谢 @Jonesxq（[#1924](https://github.com/jlcodes99/cockpit-tools/pull/1924)）。
+
+## [1.3.19] - 2026-08-14
+
+### 变更
+
+- **Codex 账号额度标签改为短写法且不再换行**：`5h` / `7d` / `5w`，模型专属窗口如 `Spark 7d`，Code Review 用短标签。完整名称只在悬停时显示。
+
+## [1.3.18] - 2026-08-14
+
+### 新增
+
+- **Codex 第三方模型目录支持按模型设置上下文窗口**：可在添加 / 编辑 API Key 的模型列表、模型供应商编辑页，或 API 服务的模型映射表中填写。官方 / DeepSeek 目录默认保留厂商值；其他模型留空则回落到「上下文与压缩阈值」或 128000。保存后，Codex 客户端和 API 服务对外模型目录都会按该窗口上报；Codex 需重启后生效。
+- **安装后首次打开和更新后启动会显示进度条**：应用加载时窗口不再长时间空白。
+- **Codex 账号卡片显示本窗口从满额到现在的用量**：API 服务池里的官方账号会显示请求数、token 和账号计费（`A $`）；没有用量时也保留 `0 req`、`0`、`A $0.00`。
+- **Codex 会话管理增加会话用量**：可从本机会话日志汇总真实 Token 用量，不依赖官方配额百分比，也不要求请求一定走 API 服务。
+
+### 变更
+
+- **Codex 官方额度改为小进度条，重置时间单独一行并与额度标签左对齐**。
+- **Codex API 服务官方 OAuth 出站身份与官方客户端对齐**：默认使用配对的 `codex-tui` 身份，不再转发下游客户端 UA；会话头改为 `Session-Id`，并带上窗口与线程标识。
+
+### 修复
+
+- **修复安装后首次打开和更新后启动卡在白屏、像死机的问题**：启动过程现在会显示进度，首屏也不再等待远程字体。
+
+## [1.3.17] - 2026-08-13
+
+### 新增
+
+- **Codex 模型供应商支持 DeepSeek 原生 Responses**：可在 Codex 中直接使用 DeepSeek Flash / Pro，默认使用官方 Responses 接口，需要时仍可切换为 Chat Completions；符合条件的账号可直接查看余额。感谢 @usertianziyang 提供部分思路（[#1839](https://github.com/jlcodes99/cockpit-tools/pull/1839)）。
+- **Codex OAuth 账号支持设备指纹模式**：可按单个或批量账号选择会话 / 设备 / 完整 / 关闭，默认使用会话模式；API Key 等其他账号类型不受影响。
+- **Codex API 服务客户端 Key 支持可选总量限额**：可为每个客户端 Key 设置总 token 额度，额度用尽后拒绝继续调用；未设置额度的 Key 保持不限量。感谢 @ndhao164（[#1870](https://github.com/jlcodes99/cockpit-tools/pull/1870)）。
+- **WorkBuddy 支持按账号隔离的内置浏览器**：可在独立窗口打开成长中心等页面，各账号登录态互不串号。感谢 @xhrxgr（[#1896](https://github.com/jlcodes99/cockpit-tools/pull/1896)）。
+- **WorkBuddy 自动签到改为后台执行**：关闭主窗口、仅保留托盘时，仍可按计划自动签到。感谢 @xdd666t（[#1772](https://github.com/jlcodes99/cockpit-tools/pull/1772)）。
+- **Trae 账号支持可选自动签到**：可按账号设置签到计划，默认关闭，不影响正常使用。感谢 @xhrxgr（[#1834](https://github.com/jlcodes99/cockpit-tools/pull/1834)）。
+- **Antigravity 账号支持本地信息管理**：可保存备注、2FA、密码、手机号及邮箱验证码查询地址，授权前可自动预填，导出时可选择是否包含敏感信息。
+- **添加或编辑 Codex API Key 时可复用同一供应商下已有的 Key**：也可继续手动输入新 Key。
+- **Codex API 服务账号可直接从账号列表移除**：无需再进入服务面板管理成员。
+
+### 变更
+
+- **WorkBuddy 开启切号共享会话后，会合并已有本地会话**：切换账号后对话历史不易丢失。感谢 @xhrxgr（[#1880](https://github.com/jlcodes99/cockpit-tools/pull/1880)）。
+- **Antigravity 账号本地资料改为整文件加密保存**：历史账号首次读取后自动迁移，原有数据不受影响。
+- **提升 Codex API 服务多轮对话与流式输出的稳定性**。
+
+### 修复
+
+- **修复部分 API Key 供应商无法保持 WebSocket 连接的问题**：开启 WebSocket 的供应商现在可维持稳定的实时连接。
+- **修复明确关闭 WebSocket 的自定义中转仍被改回官方连接方式的问题**：自定义中转的连接设置现在会被保留。感谢 @yaobii-lab（[#1867](https://github.com/jlcodes99/cockpit-tools/pull/1867)）。
+- **修复本机其他端口的本地 API 服务无法作为上游的问题**：本机任意端口的本地 API 服务现在都可正常接入。
+- **修复 Sub2API 导入后完整 OAuth 账号变成仅 Access Token 的问题**：导入后完整登录态不再丢失。感谢 @Jonesxq（[#1886](https://github.com/jlcodes99/cockpit-tools/pull/1886)）。
+- **修复 Codex 账号总览等处丢失自定义 API Key 名称的问题**：自定义名称现在可正常显示。感谢 @andrew05060414（[#1817](https://github.com/jlcodes99/cockpit-tools/pull/1817)）。
+- **修复开启压缩后 Codex API 服务误报缺少模型的问题**：开启压缩不再触发误报。感谢 @DragonLingLuo（[#1836](https://github.com/jlcodes99/cockpit-tools/pull/1836)）。
+- **修复 Multi-Agent 协作时加密消息被当成普通正文的问题**：协作消息现在可被正确处理。
+- **修复多轮对话中带命名空间的工具调用在第二轮失败的问题**：工具调用现在可跨多轮连续执行。感谢 @Jonesxq（[#1887](https://github.com/jlcodes99/cockpit-tools/pull/1887)）。
+- **修复思考型 Chat 供应商在多轮对话中被拒绝的问题**：思考型供应商现在可正常进行多轮对话。
+
 ## [1.3.16] - 2026-08-02
 
 ### 新增

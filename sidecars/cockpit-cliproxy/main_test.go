@@ -189,7 +189,7 @@ func TestSplitResponsesConcatenatedJSONDocumentsRejectsMalformedPayload(t *testi
 }
 
 func TestCodexClientModelsResponseShape(t *testing.T) {
-	response := buildCodexClientModelsResponse([]string{"gpt-5.4", "gpt-image-2", codexAutoReviewModel}, &apiKeySpec{})
+	response := buildCodexClientModelsResponse([]string{"gpt-5.4", "gpt-image-2", codexAutoReviewModel}, &apiKeySpec{}, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -235,7 +235,7 @@ func TestCodexClientModelsResponseShape(t *testing.T) {
 }
 
 func TestCodexClientModelsResponsePreserves56Template(t *testing.T) {
-	response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "custom-compat-model"}, &apiKeySpec{})
+	response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "custom-compat-model"}, &apiKeySpec{}, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -283,6 +283,67 @@ func TestCodexClientModelsResponsePreserves56Template(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsResponseAppliesExplicitContextWindows(t *testing.T) {
+	response := buildCodexClientModelsResponse(
+		[]string{"gpt-5.4", "gpt-5.6-sol", "custom-flash"},
+		&apiKeySpec{},
+		map[string]int64{
+			"gpt-5.6-sol":  900000,
+			"custom-flash": 1048576,
+		},
+	)
+	models, ok := response["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models response should contain a models array: %#v", response["models"])
+	}
+	official := findCodexClientModelForTest(models, "gpt-5.4")
+	sol := findCodexClientModelForTest(models, "gpt-5.6-sol")
+	custom := findCodexClientModelForTest(models, "custom-flash")
+	if official == nil || sol == nil || custom == nil {
+		t.Fatalf("expected official, remapped, and custom models: %#v", models)
+	}
+	if intFromAny(official["context_window"]) != 272000 {
+		t.Fatalf("official model should keep vendor context_window, got %#v", official["context_window"])
+	}
+	if intFromAny(sol["context_window"]) != 900000 || intFromAny(sol["max_context_window"]) != 900000 {
+		t.Fatalf("explicit remap window = %#v / %#v", sol["context_window"], sol["max_context_window"])
+	}
+	if intFromAny(custom["context_window"]) != 1048576 || intFromAny(custom["max_context_window"]) != 1048576 {
+		t.Fatalf("explicit custom window = %#v / %#v", custom["context_window"], custom["max_context_window"])
+	}
+}
+
+func TestContextWindowsForAPIKeyMergesScopedAccounts(t *testing.T) {
+	manifest := &manifest{
+		Accounts: []accountSpec{
+			{
+				ID: "account-a",
+				ModelContextWindows: map[string]int64{
+					"gpt-5.6-sol": 900000,
+				},
+			},
+			{
+				ID: "account-b",
+				ModelContextWindows: map[string]int64{
+					"custom-flash": 1048576,
+					"gpt-5.6-sol":  128000,
+				},
+			},
+		},
+	}
+	manifest.accountByID = map[string]*accountSpec{
+		"account-a": &manifest.Accounts[0],
+		"account-b": &manifest.Accounts[1],
+	}
+	merged := contextWindowsForAPIKey(manifest, &apiKeySpec{AccountIDs: []string{"account-b"}})
+	if merged["gpt-5.6-sol"] != 128000 || merged["custom-flash"] != 1048576 {
+		t.Fatalf("scoped merge = %#v", merged)
+	}
+	if _, ok := contextWindowsForAPIKey(manifest, &apiKeySpec{AccountIDs: []string{"account-a"}})["custom-flash"]; ok {
+		t.Fatal("account-a should not expose account-b windows")
+	}
+}
+
 func TestCodexClientModelsResponseDoesNotInjectFastMode(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -293,7 +354,7 @@ func TestCodexClientModelsResponseDoesNotInjectFastMode(t *testing.T) {
 		{name: "provider gateway", spec: &apiKeySpec{ProviderGateway: &providerGatewaySpec{}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol", "custom-compat-model"}, test.spec)
+			response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol", "custom-compat-model"}, test.spec, nil)
 			models, ok := response["models"].([]map[string]any)
 			if !ok {
 				t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -324,7 +385,7 @@ func TestCodexClientModelsResponseDoesNotInjectFastMode(t *testing.T) {
 func TestCodexClientModelsResponseEnablesWebsocketsWhenConfigured(t *testing.T) {
 	response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol"}, &apiKeySpec{
 		ResponsesWebsockets: true,
-	})
+	}, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -560,7 +621,7 @@ func TestRelayServerCockpitQuotaUpstreamFailureReturnsScopedEmptyState(t *testin
 func TestCodexClientModelsResponseDisablesSearchForProviderGateway(t *testing.T) {
 	response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol"}, &apiKeySpec{
 		ProviderGateway: &providerGatewaySpec{},
-	})
+	}, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -617,7 +678,7 @@ func TestCodexClientModelsResponseGatesProviderGatewayImageInput(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			response := buildCodexClientModelsResponse([]string{test.model}, &apiKeySpec{
 				ProviderGateway: test.gateway,
-			})
+			}, nil)
 			models, ok := response["models"].([]map[string]any)
 			if !ok {
 				t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -683,7 +744,7 @@ func stringFromAny(value any) string {
 }
 
 func TestCodexSparkUsesCompleteCodexClientCatalogTemplate(t *testing.T) {
-	response := buildCodexClientModelsResponse([]string{codexSparkCatalogTemplateModel, codexSparkModel}, &apiKeySpec{})
+	response := buildCodexClientModelsResponse([]string{codexSparkCatalogTemplateModel, codexSparkModel}, &apiKeySpec{}, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -1927,6 +1988,62 @@ func TestRequestPolicyMiddlewareSetsCPAUsageAPIKey(t *testing.T) {
 	}
 }
 
+func TestAPIKeyTokenLimiterAccumulatesAcrossModels(t *testing.T) {
+	m := &manifest{APIKeys: []apiKeySpec{{
+		ID:         "key_1",
+		Key:        "client-key",
+		TokenLimit: 10_000_000,
+		TokenUsed:  9_000_000,
+		Enabled:    true,
+	}}}
+	limiter := newAPIKeyTokenLimiter(m)
+	spec := &m.APIKeys[0]
+	if used, limit, exceeded := limiter.exceeded(spec); used != 9_000_000 || limit != 10_000_000 || exceeded {
+		t.Fatalf("unexpected initial limiter state: used=%d limit=%d exceeded=%v", used, limit, exceeded)
+	}
+	limiter.addUsage(spec, 400_000)
+	limiter.addUsage(spec, 600_000)
+	if used, limit, exceeded := limiter.exceeded(spec); used != 10_000_000 || limit != 10_000_000 || !exceeded {
+		t.Fatalf("expected limit to be reached across requests: used=%d limit=%d exceeded=%v", used, limit, exceeded)
+	}
+}
+
+func TestRequestPolicyBlocksKeyAtTokenLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	m := &manifest{APIKeys: []apiKeySpec{{
+		ID:         "key_1",
+		Label:      "Limited key",
+		Key:        "client-key",
+		TokenLimit: 10_000_000,
+		TokenUsed:  10_000_000,
+		Enabled:    true,
+	}}}
+	m.apiKeyByValue = map[string]*apiKeySpec{"client-key": &m.APIKeys[0]}
+	policy := &requestPolicy{
+		manifest:     m,
+		tracker:      newRequestUsageTracker(),
+		tokenLimiter: newAPIKeyTokenLimiter(m),
+	}
+	router := gin.New()
+	router.Use(policy.middleware())
+	router.POST("/v1/responses", func(c *gin.Context) {
+		t.Fatal("limited request should not reach the handler")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.5"}`))
+	req.Header.Set("Authorization", "Bearer client-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"code":"token_limit_exceeded"`) {
+		t.Fatalf("expected token_limit_exceeded response: %s", w.Body.String())
+	}
+}
+
 type testExecutorStatusError struct {
 	status int
 }
@@ -2244,6 +2361,45 @@ func TestUsagePluginResolvesAPIKeyAndRequestKindFromCPARecord(t *testing.T) {
 	}
 	if payload.RequestKind != "text" {
 		t.Fatalf("request kind should be inferred from endpoint, got %q", payload.RequestKind)
+	}
+}
+
+func TestUsagePluginForwardsReasoningEffortInUsagePayload(t *testing.T) {
+	tracker := newRequestUsageTracker()
+	plugin := &usagePlugin{tracker: tracker}
+	ctx := internallogging.WithRequestID(context.Background(), "req-reasoning")
+	ctx = internallogging.WithEndpoint(ctx, "POST /v1/responses")
+
+	plugin.HandleUsage(ctx, coreusage.Record{
+		Provider:        "codex",
+		Model:           "gpt-5.4",
+		ReasoningEffort: "xhigh",
+		RequestedAt:     time.UnixMilli(123),
+		Latency:         50 * time.Millisecond,
+	})
+
+	payload, ok := tracker.finalize("req-reasoning", usageFinalizeInput{
+		status:        http.StatusOK,
+		latencyMS:     50,
+		completedAtMS: 123,
+	})
+	if !ok {
+		t.Fatal("expected usage payload")
+	}
+	if payload.ReasoningEffort != "xhigh" {
+		t.Fatalf("reasoning effort was not forwarded: %#v", payload)
+	}
+
+	wire, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal usage payload: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatalf("decode usage payload: %v", err)
+	}
+	if got, ok := decoded["reasoningEffort"].(string); !ok || got != "xhigh" {
+		t.Fatalf("usage JSON reasoningEffort = %#v, want xhigh", decoded["reasoningEffort"])
 	}
 }
 
@@ -4184,7 +4340,6 @@ func TestCoreAuthSelectorFiltersNewModelExclusionsBeforeSessionAffinity(t *testi
 		t.Fatalf("Pick after exclusion = %#v, want %q", second, pro.ID)
 	}
 }
-
 
 func TestSidecarRuntimeDoesNotSelectAccountWithExcludedModel(t *testing.T) {
 	tempDir := t.TempDir()

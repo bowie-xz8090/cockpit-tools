@@ -7,6 +7,84 @@ All notable changes to Cockpit Tools will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [1.3.20] - 2026-08-14
+
+### Added
+
+- **Codex MiniMax Token Plan and Zhipu/GLM Coding Plan accounts can now show quota**: refresh to see remaining percentage, plan, and reset time. Thanks @Jonesxq ([#1929](https://github.com/jlcodes99/cockpit-tools/pull/1929)).
+- **Codex model providers add OpenCode Go, and OpenRouter includes the Luna Pro model**: OpenCode Go can be selected as a Chat Completions provider with its current model catalog. Thanks @Jonesxq ([#1922](https://github.com/jlcodes99/cockpit-tools/pull/1922)).
+- **Existing Codex model-provider API keys can be edited in place**: the provider entry stays, and linked Codex accounts pick up the new key. Thanks @Jonesxq ([#1923](https://github.com/jlcodes99/cockpit-tools/pull/1923)).
+
+### Changed
+
+- **Considering long titles such as Codex Spark, the account quota layout was adjusted**: the title sits above the bar so progress bars stay aligned.
+- **DeepSeek in Codex now exposes its real reasoning levels**: `low` / `high` / `max`, instead of Codex default `medium` / `xhigh`. Thanks @Jonesxq ([#1931](https://github.com/jlcodes99/cockpit-tools/pull/1931)).
+
+### Fixed
+
+- **Closed guides, account groups, and custom sort now survive updates**: dismissed gateway / risk / sidebar prompts are stored on disk, old localStorage keys still count as dismissed, and incomplete account lists no longer wipe group members or custom order. Group files also fail closed and write atomically. Thanks @Jonesxq ([#1933](https://github.com/jlcodes99/cockpit-tools/pull/1933), [#1919](https://github.com/jlcodes99/cockpit-tools/issues/1919)).
+- **CodeBuddy CN and WorkBuddy enterprise accounts now show real usage**: when the personal resource API returns empty, the official enterprise usage API is used. Thanks @Yuyang-0423 ([#1911](https://github.com/jlcodes99/cockpit-tools/pull/1911)).
+- **Provider usage lookup now works when the base URL is only a host root**: the configured URL is tried first, then `/v1`. Thanks @Jonesxq ([#1926](https://github.com/jlcodes99/cockpit-tools/pull/1926)).
+- **Switching Codex to the built-in OpenAI provider no longer overwrites a user-selected unmanaged `model_provider`**. Thanks @Jonesxq ([#1930](https://github.com/jlcodes99/cockpit-tools/pull/1930)).
+- **WorkBuddy scheduled check-ins now fire more reliably**: the scheduler wakes after config changes, checks once at startup, and retries when the activity is temporarily closed. Thanks @Jonesxq ([#1932](https://github.com/jlcodes99/cockpit-tools/pull/1932)).
+- **Codex API Service request logs now record reasoning effort**. Thanks @Jonesxq ([#1924](https://github.com/jlcodes99/cockpit-tools/pull/1924)).
+
+## [1.3.19] - 2026-08-14
+
+### Changed
+
+- **Codex account quota labels are now short and stay on one line**: `5h` / `7d` / `5w`, model-specific windows like `Spark 7d`, and Code Review as a short label. Full names remain in the hover tooltip.
+
+## [1.3.18] - 2026-08-14
+
+### Added
+
+- **Codex third-party model catalogs support a per-model context window**: set it on the model list when adding or editing an API Key, in the model-provider editor, or on the API Service mapping table. Official and DeepSeek catalogs keep vendor values unless you enter one; other models fall back to Compact settings or 128000. After saving, both the Codex client catalog and the API Service model list report that window; restart Codex to apply it there.
+- **First launch and post-update startup show a progress bar**: the window no longer stays blank while the app is loading.
+- **Codex account cards show usage from the last full window to now**: official accounts in the API Service pool display request count, tokens, and account-billed cost (`A $`); empty windows still show `0 req`, `0`, and `A $0.00`.
+- **Codex session management adds session usage**: real token usage is aggregated from local session logs, independent of official remaining-quota percentages and without requiring traffic to go through API Service.
+
+### Changed
+
+- **Official Codex quota bars are now compact, with reset time on its own line aligned to the quota label**.
+- **Codex API Service official OAuth outbound identity now matches official clients**: paired `codex-tui` identity is used by default and downstream client user-agents are not forwarded; session headers use `Session-Id` and include window and thread identifiers.
+
+### Fixed
+
+- **Fixed the app appearing frozen on a white screen after install or update**: startup now shows progress, and first paint no longer waits on remote fonts.
+
+## [1.3.17] - 2026-08-13
+
+### Added
+
+- **Codex model providers support native DeepSeek Responses**: use DeepSeek Flash / Pro directly in Codex with the official Responses API by default; Chat Completions is still available when needed, and eligible accounts can view their balance. Thanks @usertianziyang for providing some of the ideas ([#1839](https://github.com/jlcodes99/cockpit-tools/pull/1839)).
+- **Codex OAuth accounts support device fingerprint modes**: choose Session / Device / Full / Off per account or in batch, with Session as the default; other account types such as API Key are unaffected.
+- **Codex API Service client keys support an optional total token budget**: set a total token limit per client key and refuse further calls once it is used up; keys without a limit stay unlimited. Thanks @ndhao164 ([#1870](https://github.com/jlcodes99/cockpit-tools/pull/1870)).
+- **WorkBuddy supports a per-account built-in browser**: open pages like the growth center in a separate window so account logins never mix. Thanks @xhrxgr ([#1896](https://github.com/jlcodes99/cockpit-tools/pull/1896)).
+- **WorkBuddy auto check-in now runs in the background**: scheduled check-ins continue when the main window is closed and only the tray stays running. Thanks @xdd666t ([#1772](https://github.com/jlcodes99/cockpit-tools/pull/1772)).
+- **Trae accounts support optional auto check-in**: set a per-account schedule, off by default, with no impact on normal account use. Thanks @xhrxgr ([#1834](https://github.com/jlcodes99/cockpit-tools/pull/1834)).
+- **Antigravity accounts support local profile details**: save notes, 2FA, password, phone number, and a mail inbox for verification codes; fields can be pre-filled before authorization, and export can include or omit sensitive data.
+- **Adding or editing a Codex API Key can reuse an existing key from the same provider**: a new key can still be entered manually.
+- **Codex API Service accounts can be removed directly from the account list**: members no longer need to be managed inside the service panel.
+
+### Changed
+
+- **WorkBuddy merges existing local sessions when session sharing on switch is enabled**: conversation history is far less likely to disappear after an account switch. Thanks @xhrxgr ([#1880](https://github.com/jlcodes99/cockpit-tools/pull/1880)).
+- **Antigravity local account data is now encrypted as a whole file**: existing accounts migrate automatically on first read, and original data remains intact.
+- **Codex API Service stability improved for multi-turn chats and streaming replies**.
+
+### Fixed
+
+- **Fixed some API Key providers being unable to keep WebSocket connections**: providers with WebSocket enabled can now maintain a stable real-time connection.
+- **Fixed custom relays with WebSocket explicitly disabled being switched back to the official connection path**: the relay setting is now respected. Thanks @yaobii-lab ([#1867](https://github.com/jlcodes99/cockpit-tools/pull/1867)).
+- **Fixed local API services on other ports being rejected as upstreams**: a local API service on any port can now be used as the upstream.
+- **Fixed Sub2API imports turning full OAuth accounts into access-token-only accounts**: the full OAuth login state is preserved after import. Thanks @Jonesxq ([#1886](https://github.com/jlcodes99/cockpit-tools/pull/1886)).
+- **Fixed custom API Key names disappearing in the Codex account overview and related flows**: custom names are now displayed correctly. Thanks @andrew05060414 ([#1817](https://github.com/jlcodes99/cockpit-tools/pull/1817)).
+- **Fixed Codex API Service incorrectly reporting a missing model when request compression is enabled**: compression no longer triggers false missing-model warnings. Thanks @DragonLingLuo ([#1836](https://github.com/jlcodes99/cockpit-tools/pull/1836)).
+- **Fixed Multi-Agent collaboration treating encrypted messages as plain task text**: collaboration messages are now handled correctly.
+- **Fixed namespaced tool calls failing on the second turn of a conversation**: tool calls can now continue across multiple turns. Thanks @Jonesxq ([#1887](https://github.com/jlcodes99/cockpit-tools/pull/1887)).
+- **Fixed thinking Chat providers rejecting multi-turn Codex conversations**: thinking providers can now handle multi-turn conversations normally.
+
 ## [1.3.16] - 2026-08-02
 
 ### Added

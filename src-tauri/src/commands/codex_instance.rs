@@ -1209,6 +1209,31 @@ pub async fn codex_get_session_token_stats_across_instances(
 }
 
 #[tauri::command]
+pub async fn codex_query_session_usage(
+    query: modules::codex_session_usage::CodexSessionUsageQuery,
+) -> Result<modules::codex_session_usage::CodexSessionUsageReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        modules::codex_session_usage::query_session_usage(query)
+    })
+    .await
+    .map_err(|error| format!("读取 Codex 会话用量失败: {error}"))?
+}
+
+#[tauri::command]
+pub async fn codex_sync_session_usage(
+    rebuild: Option<bool>,
+    query: Option<modules::codex_session_usage::CodexSessionUsageQuery>,
+) -> Result<modules::codex_session_usage::CodexSessionUsageSyncResult, String> {
+    let rebuild = rebuild.unwrap_or(false);
+    let query = query.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        modules::codex_session_usage::sync_session_usage(rebuild, query)
+    })
+    .await
+    .map_err(|error| format!("扫描 Codex 会话用量失败: {error}"))?
+}
+
+#[tauri::command]
 pub async fn codex_move_sessions_to_trash_across_instances(
     session_ids: Vec<String>,
 ) -> Result<modules::codex_session_manager::CodexSessionTrashSummary, String> {
@@ -1651,10 +1676,9 @@ async fn codex_start_instance_internal(
         }
 
         let extra_args = modules::process::parse_extra_args(&default_settings.extra_args);
-        let injection_enabled = modules::codex_app_injection::enabled_for_app()
-            && modules::codex_app_injection::supports_bind_account(
-                default_bind_account_id.as_deref(),
-            );
+        let injection_enabled = modules::codex_app_injection::should_enable_injection(
+            default_bind_account_id.as_deref(),
+        );
         let injection_plan =
             modules::codex_app_injection::build_launch_args(&extra_args, injection_enabled)?;
         let launch_started = Instant::now();
@@ -1816,8 +1840,8 @@ async fn codex_start_instance_internal(
 
     modules::process::ensure_codex_launch_path_configured()?;
     let extra_args = modules::process::parse_extra_args(&instance.extra_args);
-    let injection_enabled = modules::codex_app_injection::enabled_for_app()
-        && modules::codex_app_injection::supports_bind_account(instance.bind_account_id.as_deref());
+    let injection_enabled =
+        modules::codex_app_injection::should_enable_injection(instance.bind_account_id.as_deref());
     let injection_plan =
         modules::codex_app_injection::build_launch_args(&extra_args, injection_enabled)?;
     let launch_started = Instant::now();

@@ -369,11 +369,8 @@ pub async fn inject_trae_account(
                         .map(|path| path.display().to_string())
                         .unwrap_or_else(|| "-".to_string())
                 ));
-                trae_account::refresh_account_usage_only_async(
-                    &account_id,
-                    storage_path.as_deref(),
-                )
-                .await
+                trae_account::refresh_account_usage_only_async(&account_id, storage_path.as_deref())
+                    .await
             } else {
                 trae_account::refresh_account_async(&account_id).await
             }
@@ -495,4 +492,24 @@ pub async fn inject_trae_account(
         }
         Ok(msg)
     }
+}
+
+// ============ 签到功能命令 ============
+
+/// 获取 Trae 账号的今日签到状态
+#[tauri::command]
+pub async fn get_trae_checkin_status(
+    account_id: String,
+    device_id: String,
+) -> Result<trae_account::CheckinStatusResult, String> {
+    trae_account::get_trae_checkin_status(&account_id, &device_id).await
+}
+
+/// 领取 Trae 账号的今日签到积分
+#[tauri::command]
+pub async fn claim_trae_checkin(
+    account_id: String,
+    device_id: String,
+) -> Result<trae_account::CheckinStatusResult, String> {
+    trae_account::claim_trae_checkin(&account_id, &device_id).await
 }

@@ -47,11 +47,11 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != "" {
 		t.Fatalf("Conversation_id = %q, want empty", gotConversation)
 	}
-	if gotSession := httpReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != expectedKey {
-		t.Fatalf("Session_id = %#v, want [%q]", gotSession, expectedKey)
+	if gotSession := httpReq.Header["Session-Id"]; len(gotSession) != 1 || gotSession[0] != expectedKey {
+		t.Fatalf("Session-Id = %#v, want [%q]", gotSession, expectedKey)
 	}
-	if gotCanonicalSession := httpReq.Header.Get("Session-Id"); gotCanonicalSession != "" {
-		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
+	if gotLegacySession := httpReq.Header.Get("Session_id"); gotLegacySession != "" {
+		t.Fatalf("Session_id = %q, want empty", gotLegacySession)
 	}
 
 	httpReq2, _, _, err := executor.cacheHelper(ctx, sdktranslator.FromString("openai"), url, nil, req, req.Payload, rawJSON)
@@ -115,11 +115,11 @@ func TestCodexExecutorCacheHelper_ClaudeUsesClaudeCodeSessionID(t *testing.T) {
 	if secondKey != firstKey {
 		t.Fatalf("same Claude Code session_id produced different prompt_cache_key: first=%q second=%q", firstKey, secondKey)
 	}
-	if gotSession := firstHTTPReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
-		t.Fatalf("first Session_id = %#v, want [%q]", gotSession, firstKey)
+	if gotSession := firstHTTPReq.Header["Session-Id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
+		t.Fatalf("first Session-Id = %#v, want [%q]", gotSession, firstKey)
 	}
-	if gotSession := secondHTTPReq.Header["Session_id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
-		t.Fatalf("second Session_id = %#v, want [%q]", gotSession, firstKey)
+	if gotSession := secondHTTPReq.Header["Session-Id"]; len(gotSession) != 1 || gotSession[0] != firstKey {
+		t.Fatalf("second Session-Id = %#v, want [%q]", gotSession, firstKey)
 	}
 }
 
@@ -142,11 +142,11 @@ func TestCodexExecutorCacheHelper_ClaudeRejectsBareUserID(t *testing.T) {
 	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "" {
 		t.Fatalf("bare metadata.user_id must not create prompt_cache_key, got %q; body=%s", got, string(body))
 	}
-	if got := httpReq.Header["Session_id"]; len(got) != 0 {
-		t.Fatalf("bare metadata.user_id must not create Session_id, got %#v", got)
+	if got := httpReq.Header["Session-Id"]; len(got) != 0 {
+		t.Fatalf("bare metadata.user_id must not create Session-Id, got %#v", got)
 	}
-	if got := httpReq.Header.Get("Session-Id"); got != "" {
-		t.Fatalf("bare metadata.user_id must not create Session-Id, got %q", got)
+	if got := httpReq.Header.Get("Session_id"); got != "" {
+		t.Fatalf("bare metadata.user_id must not create Session_id, got %q", got)
 	}
 }
 
@@ -162,7 +162,7 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 		Routing: config.RoutingConfig{Strategy: "fill-first"},
 		Codex:   config.CodexConfig{IdentityConfuse: true},
 	}}
-	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex"}
+	auth := &cliproxyauth.Auth{ID: "auth-1", Provider: "codex", Metadata: map[string]any{"codex_fingerprint_mode": "off"}}
 	rawJSON := []byte(`{"model":"gpt-5-codex","stream":true,"client_metadata":{"x-codex-turn-metadata":"{\"prompt_cache_key\":\"cache-1\",\"turn_id\":\"turn-1\",\"window_id\":\"cache-1:0\"}","x-codex-window-id":"cache-1:0"}}`)
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
@@ -199,16 +199,16 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	if gotWindowID := gjson.GetBytes(body, "client_metadata.x-codex-window-id").String(); gotWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("client_metadata.x-codex-window-id = %q, want %q", gotWindowID, expectedPromptCacheKey+":0")
 	}
-	if gotHeader := httpReq.Header["Session_id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
-		t.Fatalf("Session_id = %#v, want [%q]", gotHeader, expectedPromptCacheKey)
+	if gotHeader := httpReq.Header["Session-Id"]; len(gotHeader) != 1 || gotHeader[0] != expectedPromptCacheKey {
+		t.Fatalf("Session-Id = %#v, want [%q]", gotHeader, expectedPromptCacheKey)
 	}
 	for _, headerName := range []string{"X-Client-Request-Id", "Thread-Id"} {
 		if gotHeader := httpReq.Header.Get(headerName); gotHeader != expectedPromptCacheKey {
 			t.Fatalf("%s = %q, want %q", headerName, gotHeader, expectedPromptCacheKey)
 		}
 	}
-	if gotCanonicalSession := httpReq.Header.Get("Session-Id"); gotCanonicalSession != "" {
-		t.Fatalf("Session-Id = %q, want empty", gotCanonicalSession)
+	if gotLegacySession := httpReq.Header.Get("Session_id"); gotLegacySession != "" {
+		t.Fatalf("Session_id = %q, want empty", gotLegacySession)
 	}
 	if gotWindow := httpReq.Header.Get("X-Codex-Window-Id"); gotWindow != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want %q", gotWindow, expectedPromptCacheKey+":0")
@@ -222,6 +222,58 @@ func TestCodexExecutorCacheHelper_IdentityConfuseRemapsBodyAndHeaders(t *testing
 	}
 	if gotMetadataWindowID := gjson.Get(gotHeaderMetadata, "window_id").String(); gotMetadataWindowID != expectedPromptCacheKey+":0" {
 		t.Fatalf("X-Codex-Turn-Metadata.window_id = %q, want %q", gotMetadataWindowID, expectedPromptCacheKey+":0")
+	}
+}
+
+func TestCodexFingerprintConvergenceModes(t *testing.T) {
+	userPayload := []byte(`{"prompt_cache_key":"client-session","thread_id":"client-thread","client_metadata":{"x-codex-installation-id":"client-install","x-codex-window-id":"client-thread:0","x-codex-turn-metadata":"{\"installation_id\":\"client-install\",\"session_id\":\"client-session\",\"thread_id\":\"client-thread\",\"window_id\":\"client-thread:0\"}"}}`)
+	rawJSON := userPayload
+
+	for _, mode := range []string{"device", "session", "full"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := &config.Config{}
+			auth := &cliproxyauth.Auth{ID: "auth-fingerprint", Provider: "codex", Metadata: map[string]any{"codex_fingerprint_mode": mode}}
+			body, state := applyCodexFingerprintBody(cfg, auth, userPayload, rawJSON, codexIdentityConfuseState{})
+			if !state.enabled && state.fingerprintMode != mode {
+				t.Fatalf("fingerprint mode = %q, want %q", state.fingerprintMode, mode)
+			}
+			if got := gjson.GetBytes(body, "client_metadata.x-codex-installation-id").String(); got == "client-install" || got == "" {
+				t.Fatalf("installation id was not converged: %q", got)
+			}
+			if mode == "device" {
+				return
+			}
+			if got := gjson.GetBytes(body, "client_metadata.session_id").String(); got != state.sessionID {
+				t.Fatalf("session id = %q, want %q", got, state.sessionID)
+			}
+			if mode == "full" && state.threadID != state.sessionID {
+				t.Fatalf("full mode thread id = %q, want session id %q", state.threadID, state.sessionID)
+			}
+		})
+	}
+}
+
+func TestCodexFingerprintModeUsesAccountMetadata(t *testing.T) {
+	cfg := &config.Config{}
+	tests := []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want string
+	}{
+		{name: "unset defaults session", auth: &cliproxyauth.Auth{}, want: "session"},
+		{name: "missing account value defaults session", auth: &cliproxyauth.Auth{Metadata: map[string]any{"codex_fingerprint_mode": nil}}, want: "session"},
+		{name: "invalid account value defaults session", auth: &cliproxyauth.Auth{Metadata: map[string]any{"codex_fingerprint_mode": "invalid"}}, want: "session"},
+		{name: "explicit off", auth: &cliproxyauth.Auth{Metadata: map[string]any{"codex_fingerprint_mode": "off"}}, want: "off"},
+		{name: "device", auth: &cliproxyauth.Auth{Metadata: map[string]any{"codex_fingerprint_mode": "device"}}, want: "device"},
+		{name: "full", auth: &cliproxyauth.Auth{Metadata: map[string]any{"codex_fingerprint_mode": "full"}}, want: "full"},
+		{name: "api key always off", auth: &cliproxyauth.Auth{Metadata: map[string]any{"codex_fingerprint_mode": "full"}, Attributes: map[string]string{"api_key": "sk-test"}}, want: "off"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codexFingerprintMode(cfg, tt.auth); got != tt.want {
+				t.Fatalf("codexFingerprintMode() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

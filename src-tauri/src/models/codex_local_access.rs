@@ -420,6 +420,10 @@ pub struct CodexLocalAccessApiKey {
     pub allowed_models: Vec<String>,
     #[serde(default)]
     pub excluded_models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_limit: Option<u64>,
+    #[serde(default)]
+    pub token_used: u64,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -599,6 +603,28 @@ pub struct CodexLocalAccessStatsWindow {
     pub models: Vec<CodexLocalAccessModelStats>,
     #[serde(default)]
     pub api_keys: Vec<CodexLocalAccessApiKeyStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexLocalAccessAccountWindowQuery {
+    pub account_id: String,
+    pub window_key: String,
+    pub start_at: i64,
+    pub end_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexLocalAccessAccountWindowStats {
+    pub account_id: String,
+    pub window_key: String,
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub cached_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
